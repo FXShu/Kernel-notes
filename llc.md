@@ -1326,4 +1326,62 @@ static int llc_conn_ac_send_i_cmd_p_set_0(struct sock *sk, struct sk_buff *skb) 
 
 ## ISSUE
 
+### Incoming Socket Create.
+The behavior of Type 2 LLC service similar with TCP service. The listener socket will be created first, and create new socket when link is establishing. <br>
+ ```c
+static struct sock *llc_lookup_established(struct llc_sap *sap,
+                     const struct llc_addr *laddr)
+{
+    struct sock *rc;
+    struct hlist_nulls_node *node;
+    int slot = llc_sk_laddr_hashfn(sap, laddr);
+    struct hlist_nulls_head *laddr_hb = &sap->sk_laddr_hash[slot];
 
+    rcu_read_lock_bh();
+again: 
+    sk_nulls_for_each_rcu(rc, node, laddr_hb) {
+        if (llc_estab_match(sap, laddr, rc)) {
+            /* Extra checks required by SLAB_TYPESAFE_BY_RCU */
+            if (unlikely(!refcount_inc_not_zero(&rc->sk_refcnt)))
+                goto again;
+            if (unlikely(llc_sk(rc)->sap != sap ||
+                     !llc_dgram_match(sap, laddr, rc))) {
+                sock_put(rc);
+                continue;
+            }
+            goto found;
+        }
+    }
+    rc = NULL;
+    /*
+     * if the nulls value we got at the end of this lookup is
+     * not the expected one, we must restart lookup.
+     * We probably met an item that was moved to another chain.
+     */
+    if (unlikely(get_nulls_value(node) != slot))
+        goto again;
+found:
+    rcu_read_unlock_bh();
+    return rc;
+} 
+```
+The question is even the new socket is created, how can kernel search the correct sock struct instead of listener sock with the same lsap and dsap ? <br>
+```c
+static struct sock *llc_create_incoming_sock(struct sock *sk, struct net_device *dev, struct llc_addr *saddr, struct llc_addr *daddr) {
+    struct sock *newsk = llc_sk_alloc(sock_net(sk), sk->sk_family, GFP_ATOMIC, sk->sk_prot, 0);
+    struct llc_sock *newllc, *llc = llc_sk(sk);
+
+    if(!newsk)
+        goto out;
+    newllc = llc_sk(newsk);
+    memcpy(&newllc->laddr, daddr, sizeof(newllc->laddr));
+    memcpy(&newllc->daddr, saddr, sizeof(newllc->daddr));
+    newllc->dev = dev;
+    dev_hold(dev);
+    llc_sap_add_socket(llc->sap, newsk);
+    llc_sap_hold(llc->sap);
+out:
+    return newsk;
+}
+
+```
