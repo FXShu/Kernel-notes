@@ -34,7 +34,7 @@ Reading experience of Linux Kernel.
 			bgcolor=#D0D0D0 align="center">Terminals</td>
         <td style="border-width:2px; border-style:solid;border-color:#F4F4F4;
                     color:black;"
-			bgcolor=#F1E6BD align="center">Sockets</td>
+			bgcolor=#F1E6BD align="center"><a href="socket.md">Sockets</a></td>
         <td style="border-width:2px; border-style:solid;border-color:#F4F4F4;
 					border-right-width:3px; border-right-style:dashed;border-right-color:#A6CD97;
                     color:black;"
