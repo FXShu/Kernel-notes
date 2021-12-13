@@ -5,7 +5,7 @@ Linux provide 6 type of namespace.<br>
 * [Network namespace](#NET)
 * Mount namespace
 * UTS (UNIX Time-Sharing) namespace
-* Interprocess Communication namespace
+* [Interprocess Communication namespace](#IPC)
 * USER ID namespace
 ```c
 struct nsproxy {
@@ -42,7 +42,113 @@ struct nsproxy init_nsproxy = {
 };
 ```
 
-<h2 id=PID> PID </h2>
+<h2 id=IPC> IPC </h2>
+
+IPC namespaces isolate processes from SysV style inter-process communication. This prevents processes in different IPC namespaces from using, for example, the SHM family of functions to establish a range of shared memory between the two processes. Instead each process will be able to use the same identifiers for a shared memory region and produce two such distinct regions.<br>
+Linux kernel provide serval IPC type.<br>
+* Message Queue
+* Share Memory
+* Semaphore
+* [Unix socket](./socket.md)
+* Signal
+
+We will take a quick look at the namespace work with system V Message Queue, Since we only focus on namespace in this chapter.<br>
+Details of those IPC please reference corresponding chapter.<br> 
+
+### Initialize
+```c
+void __init msg_init(void) {
+    msg_init_ns(&init_ipc_ns);
+
+    if (IS_ENABLED(CONFIG_PROC_STRIPPED))
+        return;
+
+    ipc_init_proc_interface("sysvipc/msg", 
+        "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid
+        stime      rtime      ctime\n", IPC_MSG_IDS, sysvipc_msg_proc_show);
+}
+
+struct ipc_namespace init_ipc_ns = {
+    .count = REFCOUNT_INIT(1),
+    .user_ns = &init_user_ns,
+    .ns.inum = PROC_IPC_INIT_INO,
+    .ns.ops = &ipcns_operations,
+};
+```
+
+### System call
+```
+MSGGET(2)
+
+NAME
+       msgget - get a System V message queue identifier
+
+SYNOPSIS
+       #include <sys/types.h>
+       #include <sys/ipc.h>
+       #include <sys/msg.h>
+
+       int msgget(key_t key, int msgflg);
+
+DESCRIPTION
+       The  msgget() system call returns the System V message queue identifier associated with the value of the key argument.  A new message queue is created if key has the value IPC_PRIVATE or key isn't
+       IPC_PRIVATE, no message queue with the given key key exists, and IPC_CREAT is specified in msgflg.
+```
+```c
+SYSCALL_DEFINE2(msgget, key_t, key, int ,msgflg) {
+    return ksys_msgget(key, msgflg);
+}
+
+long ksys_msgget(key_t key, int msgflg) {
+    struct ipc_namespace *ns;
+    static const struct ipc_ops msg_ops = {
+        .getnew = newque,
+        .associate = security_msg_queue_associate,
+    };
+    struct ipc_params msg_params;
+
+    ns = current->nsprocy->ipc_ns;
+
+    msg_params.key = key;
+    msg_params.flg = msgflg;
+
+    return ipcget(ns, &msg_ids(ns), &msg_ops, &msg_params);
+}
+```
+The calling chain of `msgget()` systemcall like below:
+`ksys_msgget()` -> `ipcget()` -> `ipcget_public()` or `ipcget_new()`
+```c
+static int ipcget_public(struct ipc_namespace *ns, struct ipc_ids *ids,
+        const struct ipc_ops *ops, struct ipc_params *params) {
+    struct kern_ipc_perm *ipcp;
+    int flg = params->flg;
+    int err;
+
+    down_write(&ds->rwsem);
+    ipcp = ipc_findkey(ids, params->key);
+    if (ipcp == NULL) {
+        if (!(flg & IPC_CREAT))
+            err = -ENOENT;
+        else
+            err = ops->getnew(ns, params);
+    } else {
+        if (flg & IPC_CREAT && flg && IPC_EXCL)
+            err = -EEXIST;
+        else {
+            err = 0;
+            if (ops->more_checks)
+                err = ops->more_checks(ipcp, params);
+            if (!err)
+                err = ipc_check_perms(ns, ipcp, ops, params);
+        }
+        ipc_unlock(ipcp);
+    }
+    up_write(&ids->rwsem);
+    return err;
+}
+```
+The first parameter of function `ipc_findkey()` is the `nsproxy->ipc_ns->ids[IPC_MSG_IDS]` of `struct task_struct current`.
+So the user can only find the matched `struct kern_ipc_perm` in the same ipc_namespace.
 <h2 id=NET> NET </h2>
 Network namespaces virtualize the network stack. On creation a network namespace contains only a loopback interface.<br>
 Each network interface (physical or virtual) is present in exactly 1 namespace and can be moved between namespaces.<br>
