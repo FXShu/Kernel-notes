@@ -73,4 +73,99 @@ static int __init pktsched_init(void) {
 }
 ```
 ### PROC
-### Routing family Netlink
+### Routing Family Netlink
+<details><summary>Add New Queue-Discipline</summary>
+<p>
+
+The queue-discipline used to customize outgoing packet policy usually.<br>
+For the incoming packet, Queue-Discipline(`TC_H_INGRESS`) can only setup filter to drop specific packet.<br>
+
+```c
+static int tc_modify_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
+        struct netlink_ext_ack *exctack) {
+    struct net *net = sock_net(skb->sk);
+    struct tcmsg *tcm;
+    struct nlattr *tac[TCA_MAX + 1];
+    struct net_device *dev;
+    struct Qdisc *q, *p; // p used to store parent qdisc.
+    u32 clid;
+
+    err = nlmsg_parse_deprecated(n, sizeof(*tcm), tac, TCA_MAC, rtm_tca_policy, extack);
+
+    tcm = nlmsg_data(n);
+    clid = tcm->tcm_parent;
+    dev = __dev_get_by_index(net, tcm->tcm_ifindex);
+
+    if (clid) {
+        if (clid != TC_H_ROOT) {
+            if (clid != TC_H_INGRESS) {
+                p = qsidc_lookup(dev, TC_H_MAJ(clid));
+                if (!p) {
+                    NL_SET_ERR_MSG(extack, "Failed to find specified qdisc");
+                    return -ENOENT;
+                }
+                q = qdisc_leaf(p, clid);
+            } else if (dev_ingress_queue_create(dev)) {
+                q = dev_ingress_queue(dev)->qdisc_sleeping;
+            }
+        } else {
+            q = dev->qdisc;
+        }
+        // It may be default qdisc. ignore it.
+        if (q && q->handle == 0)
+            q = NULL;
+    }
+
+    if (!q || !tcm->tcm_handle || q->handle != tcm->tcm_handle) {
+        if (tcm->tcm_handle) {
+            q = qdisc_lookup(dev, tcm->tcm_handle);
+            if (!q)
+                goto create_n_graft;
+        }
+    }
+
+create_n_graft:
+    if (clid == TC_H_INGRESS) {
+        if (dev_ingress_queue(dev)) {
+            q = qdisc_create(dev, dev_ingress_queue(dev), p,
+                tcm->tcm_parent, tcm->tcm_parent,
+                tca, &err, extack);
+        }
+    } else {
+        struct netdev_queue *dev_queue;
+        if (p && p->ops->cl_ops && p->ops->cl_ops->select_queue)
+            dev_queue = p->ops->cl_ops->select_queue(p, tcm);
+        else if (p)
+            dev_queue = p->dev_queue;
+        else
+            dev_queue = netdev_get_tx_queue(dev, 0);
+
+        q = qdisc_create(dev, dev_queue, p, tcm->tcm_parent,
+                tcm->tcm_handle, tca, &err, extack);
+    }
+    if (q == NULL) {
+        if (err == -EAGAIN)
+            goto replay;
+        return err;
+    }
+}
+
+static struct Qdisc *qdisc_create(struct net_device *dev,
+        struct netdev_queue *dev_queue,
+        struct Qdisc *p, u32 parent, u32 handle,
+        struct nlattr **tca, int *errp,
+        struct netlink_ext_ack *extack) {
+    struct nlattr *kind = tca[TCA_KIND];
+    struct Qdisc *sch;
+    struct Qdisc_ops *ops;
+    struct qdisc_size_table *stab;
+
+    ops = qdisc_lookup_ops(kind);
+    sch = qdisc_alloc(dev_queue, ops, extack);
+}
+```
+The function `qdisc_lookup_ops()` used to search the corresponding queueing-discipline which registered by function `register_qdisc()` through the specified `TCA_KIND`.<br>
+
+
+</p>
+</details>
