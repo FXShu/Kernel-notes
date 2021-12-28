@@ -266,6 +266,15 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev) {
 static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 		struct net_device *dev, struct netdev_queue *txq) {
 		...
+    if (q->flags & TCQ_F_NOLOCK) {
+        rc = q->enqueue(skb, q, &to_free) & NET_XMIT_MASK;
+        qdisc_run(q);
+
+        if (unlikely(to_free))
+            kfree_skb_list(to_free);
+        return rc;
+    }
+    
 	if (unlikely(test_bit(__QDISC_STATE_DEACTIVATED, &q->state))) {
 		__qdisc_drop(skb, &to_free);
 		rc = NET_XMIT_DROP;
@@ -296,7 +305,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 		...
 }
 ```
-According to the source code, if the bitmap `TCQ_F_CAN_BYPASS` of flag of `Qdisc` is not setup, packet be enqueue to queueing-discipline by function `dev_qdisc_enqueue()` which will execute queueing-discipline propetry enqueue method.<br>
+If the bitmap `TCQ_F_CAN_BYPASS` of flag of `Qdisc` is set, packet send direct without queueing, or enqueue by function `dev_qdisc_enqueue()` if not .
 The more detailed information is below.<br>
 After packet enqueue, execute `__qdisc_run()` -> `qdisc_restart()` -> `dequeue_skb()`.<br>
 ```c
@@ -308,17 +317,67 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate, int *packets
 	if (unlikely(!skb_queue_empty(&q->gso_skb))) {
 		skb = skb_peek(&q->gso_skb);
 			...
+        goto trace;
 	}
 
 	*validate = true;
 
-	if ((q->flags & TCQ_F_ONETXQUEUE) && netif_xmit)
+	if ((q->flags & TCQ_F_ONETXQUEUE) && netif_xmit_frozen_or_stopped(txq))
+        return skb;
+
+    skb = qdisc_dequeue_skb_bad_txq(q);
+    if (unlikely(skb)) {
+        if (skb == SKB_XOFF_MAGIC)
+            return NULL;
+        goto bulk;
+    }
+    skb = q->dequeue(q);
+    if (skb) {
+bulk:
+        if (qdisc_may_bulk(q))
+            try_bulk_dequeue_skb(q, skb, txq, packets);
+        else
+            try_bulk_dequeue_skb_slow(q, skb, txq, packets);
+    }
+trace:
+    trace_qdisc_dequeue(q, txq, *packets, skb);
+    return skb;
+}
+```
+Kernel check the `gso_skb` and `skb_bad_txq` queue, if those queues is not empty, kernel will handle at this time.<br>
+Then the enqueued packet need to wait the next time call `qdisc_restart()`.<br>
+
+The `gso_skb` queue used to store the unsuccess sending packet by calling fucntion `dev_requeue_skb()`.<br>
+```c
+bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q, struct net_device *dev,
+        struct netdev_queue *txq, spinlock_t *root_lock, bool validate) {
+            ...
+    if (!dev_xmit_complete(ret)) {
+        if (unlikely(ret != NETDEV_TX_BUSY))
+            net_warn_ratelimited("BUG %s code %d qlen %d\n", dev->name, ret, q->q.qlen);
+
+        dev_requeue_skb(skb, q);
+        return false;
+    }
+    return true;
+}
+
+static inline void dev_requeue_skb(struct sk_buff *skb, struct Qdisc *q) {
+        ...
+    while(skb) {
+        struct sk_buff *next = skb->next;
+
+        __skb_queue_tail(&q->gso_skb, skb);
+            ...
+        skb = next;
+    }
+    __netif_schedule(q);
 }
 ```
 ## Queueing-Discipline
 <details><summary>pfifo_fast</summary>
 
-`pfifo_fast` is the kernel default queueing-discipline method.
+`pfifo_fast` is the kernel default queueing-discipline method.<br>
 ![pfifo_fast_enqueue](./picture/packet_schedule/pfifo_fast_enqueue.png)
 <p>
 
