@@ -190,9 +190,7 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 			sch->flags |= TCA_F_ONETXQUEUE;
 	}
 	sch->handle = handle;
-		.
-		.
-		.
+		...
 	qdisc_hash_add(sch, false);
 }
 ```
@@ -225,15 +223,11 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 				dev_queue = netdev_get_tx_queue(dev, i);
 			old = dev_graft_qdisc(dev_queue, new);
 		}
-			.
-			.
-			.
+			...
 		if (dev->flags & IFF_UP)
 			dev_activate(dev);
 	}
-		.
-		.
-		.
+		...
 }
 ```
 Function `dev_graft_qdisc()` used to restore new queueing-discipline to `net_device->_tx[].qdisc_sleeping`.<br>
@@ -246,21 +240,129 @@ After function `qdisc_graft()` success executed, the queueing-discipline of devi
 </details>
 
 ## Packet Schdule
+
+If device queueing-discipline was not specified, the default queueing-discipline (usually be `pfifo_fast_ops`) be assigned by function `attach_default_qdiscs()`.<br>
+```c
+void dev_activate(struct net_device *dev) {
+		...
+	if (dev->qdisc == &noop_qdisc)
+		attach_default_qdiscs(dev);
+		...
+}
+```
 When kernel call function `dev_queue_xmit()` to send packets, those packet will be reschedule if the queueing-discipline implement `enqueue()`.
 ```c
 static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev) {
 	struct Qdisc *q;
-		.
-		.
-		.
-
+		...
 	q = rcu_dereference_bh(txq->qdisc);
 	if (q->enqueue) {
 		rc = __dev_xmit_skb(skb, q, dev, txq);
 		goto out;
 	}
-		.
-		.
-		.
+		...
+}
+
+static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
+		struct net_device *dev, struct netdev_queue *txq) {
+		...
+	if (unlikely(test_bit(__QDISC_STATE_DEACTIVATED, &q->state))) {
+		__qdisc_drop(skb, &to_free);
+		rc = NET_XMIT_DROP;
+	} else if ((q->flags & TCQ_F_CAN_BYPASS) && !qdisc_qlen(q) &&
+			qdisc_run_begin(q)) {
+		qdisc_bstats_update(q, skb);
+
+		if (sch_direct_xmit(skb, q,dev, txq, root_lock, true)) {
+			if (unlikely(contended)) {
+				spin_unlock(&q->busylock);
+				contended = false;
+			}
+			__qdisc_run(q);
+		}
+		qdisc_run_end(q);
+		rc = NET_XMIT_SUCCESS;
+	} else {
+		rc = dev_qdisc_enqueue(skb, q, &to_free, txq);
+		if (qdisc_run_begin(q)) {
+			if (unlikely(contended)) {
+				spin_unlock(&q->busylock);
+				contended = false;
+			}
+			__qdisc_run(q);
+			qdisc_run_end(q);
+		}
+	}
+		...
 }
 ```
+According to the source code, if the bitmap `TCQ_F_CAN_BYPASS` of flag of `Qdisc` is not setup, packet be enqueue to queueing-discipline by function `dev_qdisc_enqueue()` which will execute queueing-discipline propetry enqueue method.<br>
+The more detailed information is below.<br>
+After packet enqueue, execute `__qdisc_run()` -> `qdisc_restart()` -> `dequeue_skb()`.<br>
+```c
+static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate, int *packets) {
+	const struct netdev_queue *txq = q->dev_queue;
+	struct sk_buff *skb = NULL;
+
+	*packets = 1;
+	if (unlikely(!skb_queue_empty(&q->gso_skb))) {
+		skb = skb_peek(&q->gso_skb);
+			...
+	}
+
+	*validate = true;
+
+	if ((q->flags & TCQ_F_ONETXQUEUE) && netif_xmit)
+}
+```
+## Queueing-Discipline
+<details><summary>pfifo_fast</summary>
+
+`pfifo_fast` is the kernel default queueing-discipline method.
+![pfifo_fast_enqueue](./picture/packet_schedule/pfifo_fast_enqueue.png)
+<p>
+
+```c
+static int pfifo_fast_enqueue(struct sk_buff *skb, struct Qdisc *qdisc,
+		struct sk_buff **to_free) {
+	int band = prio2band[skb->priority & TC_PRIO_MAX];
+	struct pfifo_fast_priv *priv = qdisc_priv(qdisc);
+	struct skb_array *q = band2list(priv, band);
+	unsigned int pkt_len = qdisc_pkt_len(skb);
+	int err;
+
+	err = skb_array_produce(q, skb);
+
+	if (unlikely(err)) {
+		if (qdisc_is_percpu_stats(qdisc))
+			return qdisc_drop_cpu(skb, qdisc, to_free);
+		else
+			return qdisc_drop(skb, qdisc, to_free);
+	}
+
+	qdisc_update_stats_at_enqueue(qdisc, pkt_len);
+	return NET_XMIT_SUCCESS;
+}
+```
+![pfifo_fast_dequeue](./picture/packet_schedule/pfifo_fast_dequeue.png)
+
+```c
+static int pfifo_fast_dequeue(struct Qdisc *qdisc) {
+	struct pfifoa_fast_priv *priv = qdisc_priv(qdisc);
+	struct sk_buff *skb = NULL;
+	bool need_retry = true;
+	int band;
+
+retry:
+	for (band = 0; band < PFIFO_FAST_BANDS && !skb; band++) {
+		struct skb_array *q = band2list(priv, band);
+
+		if (__skb_array_emptry(q))
+			continue;
+		skb = __skb_array_consume(q);
+	}
+		...
+	return skb;
+}
+```
+</p></details>
