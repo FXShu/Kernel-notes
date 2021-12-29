@@ -41,6 +41,20 @@ void dev_init_scheduler(struct net_device *dev) {
     timer_setup(&dev->watchdog_timer, dev_watchdog, 0);
 }
 ```
+
+```mermaid
+	flowchart LR
+	A[Root Qdisc] --> Qdisc_Policy_A{Qdisc Policy}
+	Qdisc_Policy_A --> Class_A[Class_A]
+	Class_A --- Qdisc_A[Qdisc_A]
+	Qdisc_Policy_A --> Class_B[Class_B]
+	Class_B --- Qdisc_B[Qdisc_B]
+	Qdisc_B --> Qdisc_Policy_B{Qdisc Policy}
+	Qdisc_Policy_B --> Class_C[Class_C]
+	Class_C --- Qdisc_C[Qdisc_C]
+	Qdisc_Policy_B --> Class_D[Class_D]
+	Class_D --- Qdisc_D[Qdisc_D]
+```
 ## API
 ```c
 static int __init pktsched_init(void) {
@@ -74,7 +88,7 @@ static int __init pktsched_init(void) {
 ```
 ### PROC
 ### Routing Family Netlink
-<details><summary>Add New Queue-Discipline</summary>
+<details><summary>RTM_NEWQDISC (Add New Queue-Discipline)</summary>
 <p>
 
 The queue-discipline used to customize outgoing packet policy usually.<br>
@@ -230,7 +244,7 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 		...
 }
 ```
-Function `dev_graft_qdisc()` used to restore new queueing-discipline to `net_device->_tx[].qdisc_sleeping`.<br>
+Function `dev_graft_qdisc()` used to restore new queueing-discipline type to `net_device->_tx[].qdisc_sleeping`.<br>
 And the function `dev_activate()` replace `net_device->_tx[].qdisc` from `qdisc_sleeping`.<br>
 </p></details>
 </blockquote>
@@ -240,7 +254,7 @@ After function `qdisc_graft()` success executed, the queueing-discipline of devi
 </details>
 
 ## Packet Schdule
-
+### Packet Sending
 If device queueing-discipline was not specified, the default queueing-discipline (usually be `pfifo_fast_ops`) be assigned by function `attach_default_qdiscs()`.<br>
 ```c
 void dev_activate(struct net_device *dev) {
@@ -305,8 +319,9 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 		...
 }
 ```
+### Queueing Operate
 If the bitmap `TCQ_F_CAN_BYPASS` of flag of `Qdisc` is set, packet send direct without queueing, or enqueue by function `dev_qdisc_enqueue()` if not .
-The more detailed information is below.<br>
+The more detailed information is [below](#queueing_discipline).<br>
 After packet enqueue, execute `__qdisc_run()` -> `qdisc_restart()` -> `dequeue_skb()`.<br>
 ```c
 static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate, int *packets) {
@@ -347,6 +362,7 @@ trace:
 Kernel check the `gso_skb` and `skb_bad_txq` queue, if those queues is not empty, kernel will handle at this time.<br>
 Then the enqueued packet need to wait the next time call `qdisc_restart()`.<br>
 
+### Packet Sending Retry
 The `gso_skb` queue used to store the unsuccess sending packet by calling fucntion `dev_requeue_skb()`.<br>
 ```c
 bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q, struct net_device *dev,
@@ -363,21 +379,99 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q, struct net_device *de
 }
 
 static inline void dev_requeue_skb(struct sk_buff *skb, struct Qdisc *q) {
-        ...
-    while(skb) {
-        struct sk_buff *next = skb->next;
+	spinlock_t *lock = NULL;
 
-        __skb_queue_tail(&q->gso_skb, skb);
-            ...
-        skb = next;
-    }
-    __netif_schedule(q);
+	if (q->flags & TCQ_F_NOLOCK) {
+		lock = qdisc_lock(q);
+		spin_lock(lock);
+	}
+
+	while(skb) {
+		struct sk_buff *next = skb->next;
+		__skb_queue_tail(&q->gso_skb, skb);
+		    ...
+		skb = next;
+	}
+	if (lock) {
+		spin_unlock(lock);
+		set_bit(__QDISC_STATE_MISSED, &q->state);
+	} else {
+		__netif_schedule(q);
+	}
 }
 ```
-## Queueing-Discipline
+If the `NETDEV_TX_BUSY` hanppened, the function `__netif_schedule` be executed to retry packet sending.<br>
+(If the flag `TCQ_F_NOLOCK` is set, execute `__netif_schedule` when call `qdisc_run_end()`).<br>
+```c
+void __netif_schedule(struct Qdisc *q) {
+	if (!test_and_set_bit(__QDISC_STATE_SCHED, &q->state))
+		__netif_reschedule(q);
+}
+
+static void __netif_reschedule(struct Qdisc *q) {
+	struct softnet_data *sd;
+	unsigned long flags;
+
+	local_irq_save(flags);
+	sd = this_cpu_ptr(&softnet_data);
+	q->next_sched = NULL;
+	*sd->output_queue_tailp = q;
+	sd->output_queue_tailp = &q->next_sched;
+	raise_softirq_irqoff(NET_TX_SOFTIRQ);
+	local_irq_restore(flags);
+}
+```
+`__netif_reschedule()` pending `Qdisc` to `softnet_data->output_queue` then trigger softirq `NET_TX_SOFTIRQ`.<br>
+Once `NET_TX_SOFTIRQ` is triggered, the callback function `net_tx_action()` be executed at the softirq thread.<br>
+`net_tx_action()` foreach the `output_queue` then call `qdisc_run()` for retry packet sending.<br>
+```c
+static __latent_entropy void net_tx_action(stuct softirq_action *h) {
+	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+
+		...
+	if (sd->output_queue) {
+		struct Qdisc *head;
+
+		local_irq_disable();
+		head = sd->output_queue;
+		sd->output_queue = NULL;
+		sd->output_queue_tailp = &sd->output_queue;
+		local_irq_enable();
+
+		rcu_read_lock();
+
+		while (head) {
+			struct Qdisc *q = head;
+			spinlock_t *root_lock = NULL;
+
+			head = head->next_sched;
+
+			smp_mb__before_atomic();
+
+			if (!(q->flags & TCQ_F_NOLOCK)) {
+				root_lock = qdisc_lock(q);
+				spin_lock(root_lock);
+			} else if (unlikely(test_bit(__QDISC_STATE_DEACTIVATE,
+					&q->state))) {
+				clear_bit(__QDISC_STATE_SCHED, &q->state);
+				continue;
+			}
+
+			clear_bit(__QDISC_STATE_SCHED, &q->state);
+			qdisc_run(q);
+			if (root_lock)
+				spin_unlock(root_lock);
+		}
+		rcu_read_unlock();
+	}
+	xfrm_dev_backlog(sd);
+}
+```
+<h2 id="queueing_discipline"> Queueing-Discipline </h2>
 <details><summary>pfifo_fast</summary>
 
 `pfifo_fast` is the kernel default queueing-discipline method.<br>
+#### Enqueue
 ![pfifo_fast_enqueue](./picture/packet_schedule/pfifo_fast_enqueue.png)
 <p>
 
@@ -403,6 +497,7 @@ static int pfifo_fast_enqueue(struct sk_buff *skb, struct Qdisc *qdisc,
 	return NET_XMIT_SUCCESS;
 }
 ```
+#### Dequeue
 ![pfifo_fast_dequeue](./picture/packet_schedule/pfifo_fast_dequeue.png)
 
 ```c
@@ -425,3 +520,11 @@ retry:
 }
 ```
 </p></details>
+
+<details><summary>CBQ</summary>
+
+CBQ is abbreviation of `Classes Base Queue`.
+</details>
+
+## Reference
+[Linux TC(Traffic Control)框架原理解析](https://blog.csdn.net/dog250/article/details/40483627)
