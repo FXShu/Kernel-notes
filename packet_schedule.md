@@ -523,8 +523,66 @@ retry:
 
 <details><summary>CBQ</summary>
 
-CBQ is abbreviation of `Classes Base Queue`.
+CBQ is abbreviation of `Classes Base Queue`.<br>
+#### Enqueue
+```c
+static int cbq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
+		struct sk_buff **to_free) {
+	struct cbq_sched_data *q = qdisc_priv(sch);
+	int ret;
+	struct cbq_class *cl = cbq_classify(skb, sch, &ret);
+		...
+}
+
+static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, int *qerr) {
+	struct cbq_sched_data *q = qdisc_priv(sch);
+	struct cbq_class *head = &q->link;
+		...
+	/* step 1. If skb->priority points to one of our classes, use it */
+	if (TC_H_MAJ(prio ^ sch->handle) == 0 &&
+			(cl = cbq_class_lookup(q, prio)) != NULL)
+		return cl;
+
+	for (;;) {
+
+		
+	}
+}
+```
 </details>
+
+## TMP
+```c
+struct tcf_block {
+	struct mutex lock;
+	struct list_head chain_list;
+	struct list_head chain_list;
+	u32 index;
+	i32 classid;
+	refcount_t refcnt;
+	struct net *net;
+	struct Qdisc *q;
+	struct rw_semphore cb_lock;
+	struct flow_block flow_block;
+	struct list_head owner_list;
+	bool keep_dst;
+	atomic_t offloadcnt;
+	unsigned int nooffloaddevcnt;
+	unsigned int lockeddevcnt;
+	struct {
+		struct tcf_chain *chain;
+		struct list_head filter_chain_list;
+	} chain0;
+	struct rcu_head rcu;
+	DECLARE_HASHTABLE(proto_destroy_ht, 7);
+	struct mutex proto_destroy_lock;
+}
+
+int tcf_block_get_ext(struct tcf_block **p_block, struct Qdisc *q,
+		struct tcf_block_ext_info *ei, struct netlink_ext_ack *extack) {
+	
+}
+```
 
 ## Reference
 [Linux TC(Traffic Control)框架原理解析](https://blog.csdn.net/dog250/article/details/40483627)
