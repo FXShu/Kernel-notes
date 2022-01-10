@@ -552,6 +552,61 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 </details>
 
 ## TMP
+```mermaid
+	classDiagram
+	class Qdisc {
+
+	}
+	sch .. Qdisc
+	class cbq_sched_data {
+		+ struct cbq_class link
+	}
+	q .. cbq_sched_data
+	class cbq_class {
+		+ struct tcf_block *block
+		+ struct Qdisc *qdisc
+		+ struct Qdisc *q
+		+ struct tcf_proto __ruc *filter_list
+	}
+	`q::link` .. cbq_class
+	q --> `q::link`
+	`q::link` --> sch : link.qdisc = sch
+	class tcf_block {
+		+ struct list_head owner_list
+		+ struct chain0 chain0
+	}
+	`q::link::block` .. tcf_block
+	`q::link` --> `q::link::block`
+	class tcf_block_owner_item {
+		+ struct list_head list
+		+ struct Qdisc *q
+		+ enum flow_block_binder_type binder_type
+	}
+	owner_item .. tcf_block_owner_item
+	owner_item --> sch : owner_item->q = sch
+	`q::link::block` --> owner_item : owner_list
+	class tcf_filter_chain_list_item {
+		+ struct list_head list
+		+ tcf_chain_head_change_t *chain_head_change()
+		+ void *chain_head_change_priv
+	}
+	class list_item{
+		+ chain_head_change = tcf_chain_head_change_dflt()
+		+ chain_head_change_priv = q::link::filter_list
+	}
+	list_item .. tcf_filter_chain_list_item
+	`q::link::block` --> list_item : block->chain0.filter_chain_list
+	sch --> q : qdisc_priv(sch)
+	
+	class tcf_proto {
+		+ struct tcf_proto __rcu *next;
+		+ int classify(struct sk_buff *, const struct tcf_proto *, struct tcf_result *)
+		+ __be16 protocol
+	}
+	`q::link` --> `q::link::filter_list` : tcf_chain_tp_insert_unique()
+	`q::link::filter_list` .. tcf_proto
+```
+### Block
 ```c
 struct tcf_block {
 	struct mutex lock;
@@ -584,5 +639,36 @@ int tcf_block_get_ext(struct tcf_block **p_block, struct Qdisc *q,
 }
 ```
 
+### Filter
+```c
+static struct tcf_proto *tcf_proto_create(const char *kind, u32 protocol,
+		u32 prio, struct tcf_chain *chain,
+		bool rtnl_held, struct netlink_ext_ack *extack) {
+	struct tcf_proto *tp;
+	int err;
+
+	tp = kzalloc(sizeof(*tp), GFP_KERNEL);
+
+	tp->ops = tcf_proto_lookup_ops(kind, rtnl_held, extack);
+	tp->classify = tp->ops->classify;
+	err = tp->ops->init(tp);
+		...
+	return tp;
+}
+```
+The filter type `struct tcf_proto_ops` was registered to `tcf_proto_base` by function `register_tcf_proto_ops()` which can be specified by `TCA_KIND` item via netlink command.<br>
+Filter type as below:
+* basic
+* bpf
+* cgroup
+* flow
+* flower
+* fw
+* matchall
+* route
+* rsvp
+* rsvp6
+* tcindex
+* u32
 ## Reference
 [Linux TC(Traffic Control)框架原理解析](https://blog.csdn.net/dog250/article/details/40483627)
