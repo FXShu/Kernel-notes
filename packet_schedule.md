@@ -21,7 +21,27 @@ menuconfig NET_SCHED
       maximum data flow rate for traffic which matches specified criteria.
       This code is considered to be experimental.
 ```
-
+## Components
+Components of packet schedule are `Queue-discipline(Qdisc)`, `Class` and `Filter`.<br>
+```mermaid
+	flowchart LR
+	A[Root Qdisc 1:] --> Qdisc_Filter_A{Qdisc Filter}
+	Qdisc_Filter_A --> Class_A[Class_A 1:1]
+	Class_A --- Qdisc_A[Qdisc_A 10:]
+	Qdisc_Filter_A --> Class_B[Class_B 1:2]
+	Class_B --- Qdisc_B[Qdisc_B 20:]
+	Qdisc_B --> Qdisc_Filter_B{Qdisc Filter}
+	Qdisc_Filter_B --> Class_C[Class_C 20:1]
+	Class_C --- Qdisc_C[Qdisc_C 30:]
+	Qdisc_Filter_B --> Class_D[Class_D 20:2]
+	Class_D --- Qdisc_D[Qdisc_D 40:]
+```
+* Qdisc<br>
+	`Qdisc` used to buffer packet, control the throughput of networking. <br>
+* Class<br>
+	`Class` used to present control strategy<br>
+* Filter<br>
+	`Filter` used to deliver package to specific control strategy.<br> 
 ```c
 int register_netdevice(struct net_device *dev){
             .
@@ -42,20 +62,8 @@ void dev_init_scheduler(struct net_device *dev) {
 }
 ```
 
-```mermaid
-	flowchart LR
-	A[Root Qdisc] --> Qdisc_Policy_A{Qdisc Policy}
-	Qdisc_Policy_A --> Class_A[Class_A]
-	Class_A --- Qdisc_A[Qdisc_A]
-	Qdisc_Policy_A --> Class_B[Class_B]
-	Class_B --- Qdisc_B[Qdisc_B]
-	Qdisc_B --> Qdisc_Policy_B{Qdisc Policy}
-	Qdisc_Policy_B --> Class_C[Class_C]
-	Class_C --- Qdisc_C[Qdisc_C]
-	Qdisc_Policy_B --> Class_D[Class_D]
-	Class_D --- Qdisc_D[Qdisc_D]
-```
 ## API
+### Qdisc
 ```c
 static int __init pktsched_init(void) {
     int err;
@@ -86,8 +94,8 @@ static int __init pktsched_init(void) {
     return 0;
 }
 ```
-### PROC
-### Routing Family Netlink
+
+#### Routing Family Netlink
 <details><summary>RTM_NEWQDISC (Add New Queue-Discipline)</summary>
 <p>
 
@@ -253,6 +261,75 @@ After function `qdisc_graft()` success executed, the queueing-discipline of devi
 </p>
 </details>
 
+### Filter
+```c
+static int __init tc_filter_init(void) {
+	int err;
+
+	tc_filter_wq = alloc_ordered_workqueue("tc_filter_workqueu", 0);
+	if (!tc_filter_wq)
+		return -ENOMEM;
+
+	err = register_perent_subsys(&tcf_net_ops);
+	if (err)
+		goto err_register_pernet_subsys;
+
+	rtnl_register(PF_UNSPEC, RTM_NEWTFILTER, tc_new_tfilter, NULL,
+			RTNL_FLAG_DOIT_UNLOCKED);
+	rtnl_register(PF_UNSPEC, RTM_DELTFILTER, tc_del_tfilter, NULL,
+			RTNL_FLAG_DOIT_UNLOCKED);
+	rtnl_register(PF_UNSPEC, RTM_GETTFILTER, tc_get_tfilter,
+			,tc_dump_tfilter,  RTNL_FLAG_DOIT_UNLOCKED);
+	rtnl_register(PF_UNSPEC, RTM_NEWCHAIN, tc_ctl_chain, NULL, 0);
+	rtnl_register(PF_UNSPEC, RTM_DELCHAIN, tc_ctl_chain, NULL, 0);
+	rtnl_register(PF_UNSPEC, RTM_GETCHAIN, tc_ctl_chain, tc_dump_chain, 0);
+
+	return 0;
+
+err_register_pernet_subsys:
+	destroy_workqueue(tc_filter_wq);
+	return err;
+}
+```
+<details><summary>RTM_NEWTFILTER (Add new filter)</summary>
+<p>
+
+```c
+static int tc_new_tfilter(struct sk_buff *skb, struct nlmsghdr *n,
+		struct netlink_ext_ack *extack) {
+		...
+	protocol = TC_H_MIN(t->tcm_info);
+	prio = TC_H_MAJ(t->tcm_info);
+	parent = t->tcm_parent;
+		...
+	err = __tcf_qdisc_find(net, &q, &parent, t->tcm_ifindex, false, extack);
+	err = __tcf_qdisc_cl_find(q, parent, &cl, t->tcm_ifindex, extack);
+	block = __tcf_block_find(net, q, cl, t->tcm_ifindex, t->tcm_block_index, extack);
+	block->classid = parent;
+
+	chain_index = tca[TCA_CHAIN] ? nla_get_u32(tca[TCA_CHAIN]) : 0;
+	chain = tcf_chain_get(block, chain_index, true);
+}
+
+static struct tcf_chain *tcf_chain_create(struct tcf_block *block, u32 chain_index) {
+	struct tcf_chain *chain;
+
+	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
+	if (!chain)
+		return NULL;
+
+	list_add_tail_rcu(&chain->list, &block->chain_list);
+	mutex_init(&chain->filter_chain_lock);
+	chain->block = block;
+	chain->index = chain_index;
+	chain->refcnt = 1;
+	if (!chain->index)
+		block->chain0.chain = chain;
+	return chain;
+}
+}
+```
+</p></details>
 ## Packet Schdule
 ### Packet Sending
 If device queueing-discipline was not specified, the default queueing-discipline (usually be `pfifo_fast_ops`) be assigned by function `attach_default_qdiscs()`.<br>
