@@ -291,45 +291,6 @@ err_register_pernet_subsys:
 	return err;
 }
 ```
-<details><summary>RTM_NEWTFILTER (Add new filter)</summary>
-<p>
-
-```c
-static int tc_new_tfilter(struct sk_buff *skb, struct nlmsghdr *n,
-		struct netlink_ext_ack *extack) {
-		...
-	protocol = TC_H_MIN(t->tcm_info);
-	prio = TC_H_MAJ(t->tcm_info);
-	parent = t->tcm_parent;
-		...
-	err = __tcf_qdisc_find(net, &q, &parent, t->tcm_ifindex, false, extack);
-	err = __tcf_qdisc_cl_find(q, parent, &cl, t->tcm_ifindex, extack);
-	block = __tcf_block_find(net, q, cl, t->tcm_ifindex, t->tcm_block_index, extack);
-	block->classid = parent;
-
-	chain_index = tca[TCA_CHAIN] ? nla_get_u32(tca[TCA_CHAIN]) : 0;
-	chain = tcf_chain_get(block, chain_index, true);
-}
-
-static struct tcf_chain *tcf_chain_create(struct tcf_block *block, u32 chain_index) {
-	struct tcf_chain *chain;
-
-	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
-	if (!chain)
-		return NULL;
-
-	list_add_tail_rcu(&chain->list, &block->chain_list);
-	mutex_init(&chain->filter_chain_lock);
-	chain->block = block;
-	chain->index = chain_index;
-	chain->refcnt = 1;
-	if (!chain->index)
-		block->chain0.chain = chain;
-	return chain;
-}
-}
-```
-</p></details>
 ## Packet Schdule
 ### Packet Sending
 If device queueing-discipline was not specified, the default queueing-discipline (usually be `pfifo_fast_ops`) be assigned by function `attach_default_qdiscs()`.<br>
@@ -643,7 +604,7 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 		+ struct tcf_block *block
 		+ struct Qdisc *qdisc
 		+ struct Qdisc *q
-		+ struct tcf_proto __ruc *filter_list
+		+ struct tcf_proto *filter_list
 	}
 	`q::link` .. cbq_class
 	q --> `q::link`
@@ -651,9 +612,11 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 	class tcf_block {
 		+ struct list_head owner_list
 		+ struct chain0 chain0
+		+ struct list_head chain_list
 	}
 	`q::link::block` .. tcf_block
 	`q::link` --> `q::link::block`
+	`q::link::block` --> `q::link::block::chain_list`
 	class tcf_block_owner_item {
 		+ struct list_head list
 		+ struct Qdisc *q
@@ -674,14 +637,23 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 	list_item .. tcf_filter_chain_list_item
 	`q::link::block` --> list_item : block->chain0.filter_chain_list
 	sch --> q : qdisc_priv(sch)
-	
+
+	class tcf_chain {
+		+ struct tcf_proto __rcu *filter_chain
+		+ struct list_head list
+		+ struct tcf_block *block
+	}
+	filter_1 .. tcf_chain
+	`q::link::block::chain0::chain` --> filter_1 : tcf_chain_create()
+	`q::link::block::chain_list` --> filter_1 : tcf_chain_create()
 	class tcf_proto {
 		+ struct tcf_proto __rcu *next;
 		+ int classify(struct sk_buff *, const struct tcf_proto *, struct tcf_result *)
 		+ __be16 protocol
 	}
-	`q::link` --> `q::link::filter_list` : tcf_chain_tp_insert_unique()
-	`q::link::filter_list` .. tcf_proto
+	ip_tcf_proto_1 .. tcf_proto
+	`q::link` --> ip_tcf_proto_1 : `tcf_chain_tp_insert() -> tcf_chain0_head_change()`
+	filter_1 --> ip_tcf_proto_1 : tcf_chain_tp_insert()
 ```
 ### Block
 ```c
@@ -717,7 +689,54 @@ int tcf_block_get_ext(struct tcf_block **p_block, struct Qdisc *q,
 ```
 
 ### Filter
+<details><summary>RTM_NEWTFILTER (Add new filter)</summary>
+<p>
+
 ```c
+static int tc_new_tfilter(struct sk_buff *skb, struct nlmsghdr *n,
+		struct netlink_ext_ack *extack) {
+		...
+	protocol = TC_H_MIN(t->tcm_info);
+	prio = TC_H_MAJ(t->tcm_info);
+	parent = t->tcm_parent;
+		...
+	err = __tcf_qdisc_find(net, &q, &parent, t->tcm_ifindex, false, extack);
+	err = __tcf_qdisc_cl_find(q, parent, &cl, t->tcm_ifindex, extack);
+	block = __tcf_block_find(net, q, cl, t->tcm_ifindex, t->tcm_block_index, extack);
+	block->classid = parent;
+
+	chain_index = tca[TCA_CHAIN] ? nla_get_u32(tca[TCA_CHAIN]) : 0;
+	chain = tcf_chain_get(block, chain_index, true);
+
+	tp = tcf_chain_tp_find(chain, &chain_info, protocol, prio, prio_allocate);
+	if (tp == NULL) {
+		tp_new = tcf_proto_create(name, protocol, prio, chain, rtnl_held, extack);
+		tp = tcf_chain_tp_insert_unique(chain, tp_new, protocol, prio, rtnl_held);
+	}
+
+	fh = tp->ops->get(tp, t->tcm_handle);
+
+	err = tp->ops->change(net, skb, tp, cl, t->tcm_Handle, tca, &fh,
+			flags, extack);
+}
+
+static struct tcf_chain *tcf_chain_create(struct tcf_block *block, u32 chain_index) {
+	struct tcf_chain *chain;
+
+	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
+	if (!chain)
+		return NULL;
+
+	list_add_tail_rcu(&chain->list, &block->chain_list);
+	mutex_init(&chain->filter_chain_lock);
+	chain->block = block;
+	chain->index = chain_index;
+	chain->refcnt = 1;
+	if (!chain->index)
+		block->chain0.chain = chain;
+	return chain;
+}
+
 static struct tcf_proto *tcf_proto_create(const char *kind, u32 protocol,
 		u32 prio, struct tcf_chain *chain,
 		bool rtnl_held, struct netlink_ext_ack *extack) {
@@ -733,6 +752,8 @@ static struct tcf_proto *tcf_proto_create(const char *kind, u32 protocol,
 	return tp;
 }
 ```
+</p></details><br>
+
 The filter type `struct tcf_proto_ops` was registered to `tcf_proto_base` by function `register_tcf_proto_ops()` which can be specified by `TCA_KIND` item via netlink command.<br>
 Filter type as below:
 * basic
@@ -746,6 +767,30 @@ Filter type as below:
 * rsvp
 * rsvp6
 * tcindex
-* u32
+<details><summary>u32</summary>
+
+The U32 filter is the most advanced filter available in the current implementation.<br>
+It entriely base on hashing tables, which make it robust whne there are many filter rules.<br>
+The U32 filter consisting two fields: `Selector` and `Action`.<br>
+#### Selector
+The selector was declared with `TCA_U32_SEL` item in netlink command.
+```c
+struct tc_u32_sel {
+	unsigned char flags;
+	unsigned char offshift;
+	unsigned char nkeys;
+
+	__be16 offmask;
+	__u16 off;
+	short offoff;
+
+	short hoff;
+	__be32 hmask
+	struct tc_u32_key keys[];
+}
+```
+
+</p></details>
+
 ## Reference
 [Linux TC(Traffic Control)框架原理解析](https://blog.csdn.net/dog250/article/details/40483627)
