@@ -648,6 +648,7 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 	`q::link::block::chain_list` --> filter_1 : tcf_chain_create()
 	class tcf_proto {
 		+ struct tcf_proto __rcu *next;
+		+ struct tcf_proto_ops *ops
 		+ int classify(struct sk_buff *, const struct tcf_proto *, struct tcf_result *)
 		+ __be16 protocol
 		+ void *data
@@ -655,6 +656,10 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 	}
 	`q::link` --> ip_tcf_proto_1 : `q::link::filter_list (tcf_chain_tp_insert() -> tcf_chain0_head_change())`
 	ip_tcf_proto_1 .. tcf_proto
+	class ip_tcf_proto_1 {
+		+ struct tcf_proto_ops *ops = cls_u32_ops
+		+ int classify(struct sk_buff*, const struct tcf_proto *, struct tcf_result*) = cls_u32_classify
+	}
 	tc_u_hnode_1 .. tc_u_hnode
 	ip_tcf_proto_1 --> tc_u_hnode_1 : ip_tcf_proto::root
 	tc_u_knode_1 .. tc_u_knode
