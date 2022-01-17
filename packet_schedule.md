@@ -679,9 +679,16 @@ static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, in
 		+ struct tcf_proto __rcu *next;
 		+ int classify(struct sk_buff *, const struct tcf_proto *, struct tcf_result *)
 		+ __be16 protocol
+		+ void *data
+		+ void *root
 	}
 	`q::link` --> `q::link::filter_list` : tcf_chain_tp_insert_unique()
 	`q::link::filter_list` .. tcf_proto
+	`q::link::filter_list`-->`q::link::filter_list::root`
+	`q::link::filter_list::root` .. tc_u_hnode
+
+	tc_u_hnode --> tc_u_knode
+	tc_u_knode --> tc_u32_sel
 ```
 ### Block
 ```c
@@ -733,6 +740,7 @@ static struct tcf_proto *tcf_proto_create(const char *kind, u32 protocol,
 	return tp;
 }
 ```
+
 The filter type `struct tcf_proto_ops` was registered to `tcf_proto_base` by function `register_tcf_proto_ops()` which can be specified by `TCA_KIND` item via netlink command.<br>
 Filter type as below:
 * basic
@@ -746,6 +754,59 @@ Filter type as below:
 * rsvp
 * rsvp6
 * tcindex
-* u32
+<details><summary>u32</summary>
+<p>
+
+```c
+static int u32_change(struct net *net, struct sk_buff *skb,
+		struct tcf_proto *tp, unsigned long base, u32 handle,
+		struct nlattr **tca, void **arg, bool ovr, bool rtnl_held,
+		struct netlink_ext_ack *extack) {
+	struct tc_u_knode *n;
+			...
+		
+	n = *arg;
+	if (n) {
+			...
+		err = u32_replace_hw_knode(tp, new, flags, extack);
+		if (err) {
+			u32_destroy_key(new, false);
+			return err;
+		}
+		if (!tc_in_hw(new->flags))
+			new->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
+
+		u32_replace_knode(tp, tp_c, new);
+		tcf_unbind_filter(tp, &n->res);
+		tcf_exts_get_net(&n->exts);
+	}
+	err = u32_set_parms(net, tp, base, n, tb, tca[TCA_RATE], ovr, extack);
+	if (err == 0) {
+		struct tc_u_knode __rcu **ins;
+		struct tc_u_knode *pins;
+
+		err = u32_replace_hw_knode(tp, n, flags, extack);
+		if (err)
+			goto errhw;
+
+		if (!tc_in_hw(n->flags))
+			n->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
+
+		ins = &ht->ht[TC_U32_HASH(handle)];
+		for (pins = rtnl_dereference(*ins); pins;
+				ins = &pins->next, pins = rtnl_deference(*ins))
+			if(TC_U32_NODE(handle)) < TC_U32_NODE(pins->handle)
+				break;
+
+		RCU_INIT_POINTER(n->next, pins);
+		rcu_assign_pointer(*ins, n);
+		tp_c->knodes++;
+		*arg = n;
+		return 0;
+	}
+		...
+}
+```
+</p></details>
 ## Reference
 [Linux TC(Traffic Control)框架原理解析](https://blog.csdn.net/dog250/article/details/40483627)
