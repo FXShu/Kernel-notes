@@ -78,7 +78,8 @@ Reading experience of Linux Kernel.
     </tr>
     <tr>
         <td style="border-width:2px; border-style:solid;border-color:#F4F4F4; color:black;"
-			bgcolor=#F1E6BD align="center"  colspan="1" rowspan="1">Packet Scheduler</td>
+			bgcolor=#F1E6BD align="center"  colspan="1" rowspan="1">
+            <a href=packet_schedule.md>Packet Scheduler</a></td>
         <td style="border-right-width:3px; border-right-style:dashed;border-right-color:#9EC8C4; color:black;"
 			bgcolor="white" align="center"  colspan="1" rowspan="2"></td>
         <td style="border-right-width:3px; border-right-style:dashed; border-right-color:#C29CB0; color:black;"
