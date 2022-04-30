@@ -67,7 +67,6 @@ cleanup:
 As the source code, we can know the BPF program name `bpf_prog1` was extract from `tracex1_kern.o`.<br>
 The BPF process divided to<br>
 * [Create `struct bpf_object` instance from ELF file.](#create_bpf_object_instance)
-* bpf_object__find_program_by_name (TODO)
 * bpf_object__load (TODO)
 * bpf_program__attach(TODO)
 
@@ -486,6 +485,193 @@ The flag `SHF_EXECINSTR` means that `The section contains executable machine ins
     [16] DATASEC 'version' size=0 vlen=1
             type_id=14 offset=0 size=4 (VAR '_version')
     ```
-* SHT_REL<br>
-    <font color="red">TODO</font>
-    
+    * SHT_REL<br>
+        <font color="red">TODO</font>
+
+<h3 style="font-weight:bold" id="create_bpf_object_instance"> bpf_object__load. </h3>
+
+`bpf_object__load()` -> `bpf_object_load()` -> `bpf_object__probe_loading()`
+```c
+static int bpf_object__probe_loading(struct bpf_object *obj) {
+        char *cp, errmsg[STRERR_BUFSIZE];
+        struct bpf_insn insns[] = {
+                BPF_MOV64_IMM(BPF_REG_0, 0),
+                BPF_EXIT_INSN(),
+        };
+        int ret, insn_cnt = ARRAY_SIZE(insns);
+                ...
+        ret = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns, insn_cnt, NULL);
+        if (ret < 0)
+                ret = bpf_prog_load(BPF_PROG_TYPE_TRACEPOINT, NULL, "GPL", insns, insn_cnt, NULL);
+                ...
+}
+
+```
+`bpf_prog_load()` -> `bpf_prog_load()` -> `bpf_load_program()` -> `bpf_load_program_xattr2()` -><br>
+`bpf_prog_load_v0_6_0()` -> `sys_bpf_prog_load()` -> ... -> `__sys_bpf`.<br>
+```c
+static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size) {
+                ...
+        switch(cmd) {
+                        ...
+        case BPF_PROG_LOAD:
+                err = bpf_prog_load(&attr, uattr);
+                break;
+                        ...
+        }
+}
+static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr) {
+        struct bpf_prog *prog, *dst_prog = NULL;
+                ...
+        prog = bpf_prog_alloc(bpf_prog_size(attr->insn_cnt), GFP_USER);
+                ...
+        find_prog_type(type, prog);
+                ...
+        bpf_check(&prog, attr, uattr);
+        bpf_prog_select_runtime(prog, &err);
+}
+```
+The upper half of function `bpf_prog_load()` is used to create and fill `struct bpf_prog` instance.<br>
+Like a function `find_prog_type()` assgin the operator of `struct bpf_prog` according to the member `prog_type`.<br>
+All the definition of operator is defined at `linux/bpf_types.h`.<br>
+```c
+static int find_prog_type(enum bpf_prog_type type, struct bpf_prog *prog) {
+        const struct bpf_prog_ops *ops;
+
+        if (type >= ARRAY_SIZE(bpf_prog_types))
+                return -EINVAL;
+        type = array_index_nospec(type, ARRAY_SIZE(bpf_prog_types));
+        ops = bpf_prog_types[type];
+        if (!ops)
+                return -EINVAL;
+        if (!bpf_prog_is_dev_bound(prog->aux))
+                prog->aux->ops = ops;
+        else
+                peog->aux->ops = *bpf_offload_porg_ops;
+        prog->type = type;
+        return 0;
+}
+```
+The lower half hook bpf program to kernel.<br>
+* bpf_prog_select_func
+    The ebpf program may be executed by EBPF virtual machine or directly execute as host instructure via JIT(just-in-time) compiler.<br>
+    ```c
+    struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err) {
+                    ...
+            bpf_prog_select_func(fp);
+
+            if (!bpf_prog_is_dev_bound(fp->aux)) {
+                *err = bpf_prog_alloc_jited_linfo(fp);
+
+                fp = bpf_int_jit_compile(fp);
+                bpf_prog_jit_attempt_done(fp);
+            } else {
+                *err = bpf_prog_offload_compile(fp);
+            }
+    finalize:
+            bpf_prog_lock_ro(fp);
+            *err = bpf_check_tail_call(fp);
+
+            return fp;
+    }
+    ```
+    If system not enable option `CONFIG_BPF_JIT_ALWAYS_ON`, the `bpf_func` which called when hook function trigger be assigned to BPF interpreter.<br>
+    ```c
+    static void bpf_prog_select_func(struct bpf_prog *fp) {
+    #ifndef CONFIG_BPF_JIT_ALWAYS_ON
+            u32 stack_depath = max_t(u32, fp->aux->stack_depath, 1);
+            fp->bpf_func = interpreters[(round_up(stack_depth, 32) / 32) - 1];
+    #else
+            fp->bpf_func = __bpf_prog_ret0_warn;
+    #endif
+    }
+    ```
+    The interpreter defined at file `kernel/bpf/core.c`.<br>
+    ```c
+    #define PROG_NAME(stack) __bpf_prog_run##stack_size
+    #define DEFINE_BPF_PROG_RUN(stack_size) \
+    static unsigned int PROG_NAME(stack_size)(const void *ctx, const struct bpf_insn *insn) \
+    { \
+            u64 stack[stack_size / sizeof(u64)]; \
+            u64 regs[MAX_BPF_EXT_REG]; \
+    \
+            FP = (u64)(unsigned long) &stack[ARRAY_SIZE(stack)]; \
+            ARG1 = (u64) (unsigned long) ctx; \
+            return ___bpf_prog_run(regs, insn); \
+    }
+
+    static unsigned int (*interpreters[])(const void *ctx, const struct bpf_insn *insn) = {
+        EVAL6(PROG_NAME_LIST, 32, 64, 96, 128, 160, 192)
+        EVAL6(PROG_NAME_LIST, 224, 256, 288, 320, 352, 384),
+        EVAL4(PROG_NAME_LIST, 416, 448, 480, 512)
+    }
+    ```
+    If the compile option  `CONFIG_BPF_JIT_DEFAULT_ON` and `CONFIG_HAVE_EBPF_JIT` is enabled (bpf_prog->jit_rqeusted), <br>
+    the `BPF` program should be JIT compiler compiling before executed.<br>
+    If the JIT image is built success, that `prog->bpf_func` replace by the image and the `jited` flag will be setup.<br>
+    ```c
+    arch/x86/net/bpf_jit_comp.c
+    struct x64_jit_data {
+        struct bpf_binary_header *rw_header;
+        struct bpf_binary_header *header;
+        int *addrs;
+        u8 *image;
+        int proglen;
+        struct jit_context ctx;
+    };
+
+    struct bpf *bpf_int_jit_compile(struct bpf_prog *prog) {
+        struct x64_jit_data *jit_data;
+        struct jit_context ctx = {};
+
+                    ...
+        addrs = jit_data->addrs;
+        addrs = kvmalloc_array(prog->len + 1, sizeof(*addrs), GFP_KERNEL);
+
+        /*
+         * Before first pass, make a rough estimation of addrs[]
+         * echo BPF instruction is translated to less than 64 bytes.
+         */
+        for (proglen = 0, i = 0; i <= prog->len; i++) {
+            proglen += 64;
+            addrs[i] = proglen;
+        }
+
+        for (pass = 0; pass < MAX_PASSES || image; pass++) {
+            proglen = do_jit(prog, addrs, image, rw_image, oldproglen, &ctx, padding);
+                        ...
+            if (image) {
+                if (proglen != oldproglen) {
+                    pr_err("bpf_jit: proglen=%d != oldproglen=%d\n",
+                            proglen, oldproglen);
+                }
+                break;
+            }
+                    ...
+        }
+        if (bpf_jit_enable > 1)
+            bpf_jit_dump(prog->len, proglen, pass + 1, image);
+        if (image) {
+            if (!prog->is_func || extra_pass) {
+                if (WARN_ON(bpf_jit_binary_pack_finalize(prog, header, rw_header))) {
+                    header = NULL;
+                    goto out_image;
+                }
+                bpf_tail_call_direct_fixup(prog);
+            } else {
+                jit_data->addrs = addrs;
+                jit_data->ctx = ctx;
+                jit_data->proglen = proglen;
+                jit_data->image = image;
+                jit_data->header = header;
+                jit_data->rw_header = rw_header;
+            }
+            prog->bpf_func = (void *)image;
+            prog->jited = 1;
+            prog->jited_len = proglen;
+        }
+                    ...
+        return prog;
+    }
+    ```
+
