@@ -29,11 +29,179 @@ static int load_with_options(int argc, char **argv, bool first_prog_only) {
     bpf_object__close(obj);
     return 0;
 }
-
 ```
+
+### BPF program read
+
+```c
+static struct bpf_object *bpf_object_open(const char *path, const void *obj_buf,
+                size_t obj_buf_sz, const struct bpf_object_open_opts *opts) {
+                ...
+        err = bpf_object__elf_init(obj);
+        err = err ? : bpf_obeject__check_endianness(obj);
+        err = err ? : bpf_object__elf_collect(obj);
+        err = err ? : bpf_object__collect_externs(obj);
+        err = err ? : bpf_object__finalize_btf(obj);
+        err = err ? : bpf_object__init_maps(obj);
+        err = err ? : bpf_object_init_progs(obj);
+        err = err ? : bpf_object__collect_relos(obj);
+
+        bpf_object__elf_finish(obj);
+}
+```
+
+#### bpf_object__elf_collect
+
+```c
+static int bpf_object__elf_collect(struct bpf_object *obj) {
+                ...
+        while((scn = elf_next(elf, scn)) != NULL) {
+                        ...
+                date = elf_sec_data(obj, scn);
+                if (strcmp(name, "license") == 0) {
+                        ...
+                } else if (sh->sh_type == SHT_PROGBITS && data->d_size > 0) {
+                        if (sh->sh_flags & SHF_EXECINSTR) {
+                                if (strcmp(name, ".text") == 0)
+                                        obj->efile.text_shndx = idx;
+                                err = bpf_object__add_programs(obj, data, name, idx);
+                        }
+                                ...
+                }
+        }
+}
+
+static int bpf_object__add_programs(struct bpf_object *obj, Elf_Data *sec_data,
+                const char *sec_name, int sec_idx) {
+                ...
+    progs = obj->programs;
+    nr_progs = obj->nr_programs;
+    nr_syms = symbols->d_size / sizeof(Elf64_Sym);
+    sec_off = 0;
+
+    for (i = 0; i < nr_syms; i++) {
+        sym = elf_sym_by_idx(obj, i);
+
+        prog_sz = sym->st_size;
+        sec_off = sym->st_value;
+
+        name = elf_sym_str(obj, sym->st_name);
+
+        pr_debug("sec '%s': found program '%s' at insn offset %zu (%zu bytes), code size %zu insns (%zu bytes)\n",
+             sec_name, name, sec_off / BPF_INSN_SZ, sec_off, prog_sz / BPF_INSN_SZ, prog_sz);
+
+        progs = libbpf_reallocarray(progs, nr_progs + 1, sizeof(*progs));
+        obj->programs = progs;
+
+        prog = &progs[nr_progs];
+
+        err = bpf_object__init_prog(obj, prog, name, sec_idx, sec_name,
+                        sec_off, data + sec_off, prog_sz);
+                        ...
+        nr_progs++;
+        obj->nr_programs = nr_progs;
+    }
+
+    return 0;
+}
+
+static int bpf_object__init_prog(struct bpf_object *obj, struct bpf_program *prog,
+                const char *name, size_t sec_idx, const char *sec_name,
+                size_t sec_off, void *insn_data, size_t insn_data_sz) {
+
+    memset(prog, 0, sizeof(*prog));
+    prog->obj = obj;
+
+    prog->sec_idx = sec_idx;
+    prog->sec_insn_off = sec_off / BPF_INSN_SZ;
+    prog->sec_insn_cnt = insn_data_sz / BPF_INSN_SZ;
+    /* insns_cnt can later be increased by appending used subprograms */
+    prog->insns_cnt = prog->sec_insn_cnt;
+
+    prog->type = BPF_PROG_TYPE_UNSPEC;
+
+    if (sec_name[0] == '?') {
+        prog->autoload = false;
+        /* from now on forget there was ? in section name */
+        sec_name++;
+    } else {
+        prog->autoload = true;
+    }
+
+    prog->instances.fds = NULL;
+    prog->instances.nr = -1;
+
+    prog->pin_name = __bpf_program__pin_name(prog);
+    if (!prog->pin_name)
+        goto errout;
+
+    prog->insns = malloc(insn_data_sz);
+    if (!prog->insns)
+        goto errout;
+    memcpy(prog->insns, insn_data, insn_data_sz);
+
+    return 0;
+}
+```
+
+#### bpf_object_init_progs
+
+```c
+static int bpf_object_init_progs(struct bpf_object *obj, const struct bpf_object_open_opts *opts)
+{
+        struct bpf_program *prog;
+        int err;
+
+        bpf_object__for_each_program(prog, obj) {
+                prog->sec_def = find_sec_def(prog->sec_name);
+                if (!prog->sec_def) {
+                        /* couldn't guess, but user might manually specify */
+                        pr_debug("prog '%s': unrecognized ELF section name '%s'\n",
+                                prog->name, prog->sec_name);
+                        continue;
+                }
+
+                prog->type = prog->sec_def->prog_type;
+                prog->expected_attach_type = prog->sec_def->expected_attach_type;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+                if (prog->sec_def->prog_type == BPF_PROG_TYPE_TRACING ||
+                    prog->sec_def->prog_type == BPF_PROG_TYPE_EXT)
+                        prog->attach_prog_fd = OPTS_GET(opts, attach_prog_fd, 0);
+#pragma GCC diagnostic pop
+
+                /* sec_def can have custom callback which should be called
+                 * after bpf_program is initialized to adjust its properties
+                 */
+                if (prog->sec_def->prog_setup_fn) {
+                        err = prog->sec_def->prog_setup_fn(prog, prog->sec_def->cookie);
+                        if (err < 0) {
+                                pr_warn("prog '%s': failed to initialize: %d\n",
+                                        prog->name, err);
+                                return err;
+                        }
+                }
+        }
+
+        return 0;
+}
+```
+
 ### BPF program loading
 ```c
 static int bpf_object_load(struct bpf_object *obj, int extra_log_level, const char *target_btf_path) {
+                ...
+        err = bpf_object__probe_loading(obj);
+        err = err ? : bpf_object__load_vmlinux_btf(obj, false);
+        err = err ? : bpf_object__resolve_externs(obj, obj->kconfig);
+        err = err ? : bpf_object__sanitize_and_load_btf(obj);
+        err = err ? : bpf_object__sanitize_maps(obj);
+        err = err ? : bpf_object__init_kern_struct_ops_maps(obj);
+        err = err ? : bpf_object__create_maps(obj);
+        err = err ? : bpf_object__relocate(obj, obj->btf_custom_path ? : target_btf_path);
+        err = err ? : bpf_object__load_progs(obj, extra_log_level);
+        err = err ? : bpf_object_init_prog_arrays(obj);
 
 }
 ```
