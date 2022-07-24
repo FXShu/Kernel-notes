@@ -485,31 +485,95 @@ The flag `SHF_EXECINSTR` means that `The section contains executable machine ins
     [16] DATASEC 'version' size=0 vlen=1
             type_id=14 offset=0 size=4 (VAR '_version')
     ```
+    print human readable information of BTF section directly by `llvm-objdump`.
+    ```
+    ➜  bpf git:(master) ✗ llvm-objdump-6.0 -d  tracex1_kern.o
+
+        tracex1_kern.o: file format elf64-bpf
+
+        Disassembly of section kprobe/__netif_receive_skb_core:
+
+        0000000000000000 <bpf_prog1>:
+        0:       79 13 70 00 00 00 00 00 r3 = *(u64 *)(r1 + 112)
+        1:       bf a1 00 00 00 00 00 00 r1 = r10
+        2:       07 01 00 00 e8 ff ff ff r1 += -24
+        3:       b7 02 00 00 08 00 00 00 r2 = 8
+        4:       85 00 00 00 71 00 00 00 call 113
+        5:       b7 06 00 00 00 00 00 00 r6 = 0
+        6:       7b 6a f0 ff 00 00 00 00 *(u64 *)(r10 - 16) = r6
+        7:       79 a3 e8 ff 00 00 00 00 r3 = *(u64 *)(r10 - 24)
+        8:       07 03 00 00 10 00 00 00 r3 += 16
+        9:       bf a1 00 00 00 00 00 00 r1 = r10
+        10:       07 01 00 00 f0 ff ff ff r1 += -16
+        11:       b7 02 00 00 08 00 00 00 r2 = 8
+        12:       85 00 00 00 71 00 00 00 call 113
+        13:       79 a7 f0 ff 00 00 00 00 r7 = *(u64 *)(r10 - 16)
+        14:       63 6a f0 ff 00 00 00 00 *(u32 *)(r10 - 16) = r6
+        15:       79 a3 e8 ff 00 00 00 00 r3 = *(u64 *)(r10 - 24)
+        16:       07 03 00 00 70 00 00 00 r3 += 112
+        17:       bf a1 00 00 00 00 00 00 r1 = r10
+        18:       07 01 00 00 f0 ff ff ff r1 += -16
+        19:       b7 02 00 00 04 00 00 00 r2 = 4
+        20:       85 00 00 00 71 00 00 00 call 113
+        21:       61 a6 f0 ff 00 00 00 00 r6 = *(u32 *)(r10 - 16)
+        22:       bf a1 00 00 00 00 00 00 r1 = r10
+        23:       07 01 00 00 f0 ff ff ff r1 += -16
+        24:       b7 02 00 00 10 00 00 00 r2 = 16
+        25:       bf 73 00 00 00 00 00 00 r3 = r7
+        26:       85 00 00 00 71 00 00 00 call 113
+        27:       71 a1 f0 ff 00 00 00 00 r1 = *(u8 *)(r10 - 16)
+        28:       55 01 11 00 6c 00 00 00 if r1 != 108 goto +17 <LBB0_3>
+        29:       71 a1 f1 ff 00 00 00 00 r1 = *(u8 *)(r10 - 15)
+        30:       55 01 0f 00 6f 00 00 00 if r1 != 111 goto +15 <LBB0_3>
+        31:       b7 01 00 00 00 00 00 00 r1 = 0
+        32:       73 1a e6 ff 00 00 00 00 *(u8 *)(r10 - 26) = r1
+        33:       b7 01 00 00 64 0a 00 00 r1 = 2660
+        34:       6b 1a e4 ff 00 00 00 00 *(u16 *)(r10 - 28) = r1
+        35:       b7 01 00 00 65 6e 20 25 r1 = 622882405
+        36:       63 1a e0 ff 00 00 00 00 *(u32 *)(r10 - 32) = r1
+        37:       18 01 00 00 73 6b 62 20 00 00 00 00 25 70 20 6c r1 = 7791350660110379891 ll
+        39:       7b 1a d8 ff 00 00 00 00 *(u64 *)(r10 - 40) = r1
+        40:       79 a3 e8 ff 00 00 00 00 r3 = *(u64 *)(r10 - 24)
+        41:       bf a1 00 00 00 00 00 00 r1 = r10
+        42:       07 01 00 00 d8 ff ff ff r1 += -40
+        43:       b7 02 00 00 0f 00 00 00 r2 = 15
+        44:       bf 64 00 00 00 00 00 00 r4 = r6
+        45:       85 00 00 00 06 00 00 00 call 6
+
+        0000000000000170 <LBB0_3>:
+        46:       b7 00 00 00 00 00 00 00 r0 = 0
+        47:       95 00 00 00 00 00 00 00 exit
+    ```
     * SHT_REL<br>
         <font color="red">TODO</font>
 
-<h3 style="font-weight:bold" id="create_bpf_object_instance"> bpf_object__load. </h3>
+<h3 style="font-weight:bold" id="load_bpf_prog_to_kernel"> Load BPF program to Kernel. </h3>
 
-`bpf_object__load()` -> `bpf_object_load()` -> `bpf_object__probe_loading()`
+#### User Space
+`bpf_object__load()` -> `bpf_object_load()` -> `bpf_object__load_progs()` -> `bpf_object_load_prog()`
 ```c
-static int bpf_object__probe_loading(struct bpf_object *obj) {
-        char *cp, errmsg[STRERR_BUFSIZE];
-        struct bpf_insn insns[] = {
-                BPF_MOV64_IMM(BPF_REG_0, 0),
-                BPF_EXIT_INSN(),
-        };
-        int ret, insn_cnt = ARRAY_SIZE(insns);
+static int bpf_object_load_prog(struct bpf_object *obj, struct bpf_program *prog, const char *license, __u32 kern_ver) {
                 ...
-        ret = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns, insn_cnt, NULL);
-        if (ret < 0)
-                ret = bpf_prog_load(BPF_PROG_TYPE_TRACEPOINT, NULL, "GPL", insns, insn_cnt, NULL);
-                ...
+        for (i = 0; i < prog->instances.nr; i++) {
+                struct bpf_prog_prep_result result;
+                bpf_program_prep_t preprocessor = prog->preprocessor;
+
+                preprocessor(prog, i, prog->insns, prog->insns_cnt, &result);
+
+                bpf_object_load_prog_instance(obj, prog, result.new_insn_ptr,
+                                result.new_insn_cnt, license, kern_ver, &fd);
+                prog->instances.fds[i] = fd;
+        }
+        return libbpf_err(err);
 }
 
 ```
-`bpf_prog_load()` -> `bpf_prog_load()` -> `bpf_load_program()` -> `bpf_load_program_xattr2()` -><br>
+`bpf_object_load_prog_instance()` -> `bpf_prog_load()` -> `bpf_prog_load()` -> `bpf_load_program()` -> `bpf_load_program_xattr2()` -><br>
 `bpf_prog_load_v0_6_0()` -> `sys_bpf_prog_load()` -> ... -> `__sys_bpf`.<br>
+After BPF program loading success, the file descriptor of program will return and store at the `prog->instances.fds` field.<br>
+#### Kernel Space
 ```c
+kernel/bpf/syscall.c
 static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size) {
                 ...
         switch(cmd) {
@@ -528,13 +592,12 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr) {
         find_prog_type(type, prog);
                 ...
         bpf_check(&prog, attr, uattr);
+        
         bpf_prog_select_runtime(prog, &err);
+        
+        bpf_prog_alloc_id(prog);
 }
-```
-The upper half of function `bpf_prog_load()` is used to create and fill `struct bpf_prog` instance.<br>
-Like a function `find_prog_type()` assgin the operator of `struct bpf_prog` according to the member `prog_type`.<br>
-All the definition of operator is defined at `linux/bpf_types.h`.<br>
-```c
+
 static int find_prog_type(enum bpf_prog_type type, struct bpf_prog *prog) {
         const struct bpf_prog_ops *ops;
 
@@ -551,127 +614,382 @@ static int find_prog_type(enum bpf_prog_type type, struct bpf_prog *prog) {
         prog->type = type;
         return 0;
 }
-```
-The lower half hook bpf program to kernel.<br>
-* bpf_prog_select_func
-    The ebpf program may be executed by EBPF virtual machine or directly execute as host instructure via JIT(just-in-time) compiler.<br>
-    ```c
-    struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err) {
-                    ...
-            bpf_prog_select_func(fp);
 
-            if (!bpf_prog_is_dev_bound(fp->aux)) {
+struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err) {
+                ...
+        bpf_prog_select_func(fp);
+
+        if (!bpf_prog_is_dev_bound(fp->aux)) {
                 *err = bpf_prog_alloc_jited_linfo(fp);
 
                 fp = bpf_int_jit_compile(fp);
                 bpf_prog_jit_attempt_done(fp);
-            } else {
+        } else {
                 *err = bpf_prog_offload_compile(fp);
-            }
-    finalize:
-            bpf_prog_lock_ro(fp);
-            *err = bpf_check_tail_call(fp);
+        }
+finalize:
+        bpf_prog_lock_ro(fp);
+        *err = bpf_check_tail_call(fp);
 
-            return fp;
-    }
-    ```
-    If system not enable option `CONFIG_BPF_JIT_ALWAYS_ON`, the `bpf_func` which called when hook function trigger be assigned to BPF interpreter.<br>
-    ```c
-    static void bpf_prog_select_func(struct bpf_prog *fp) {
-    #ifndef CONFIG_BPF_JIT_ALWAYS_ON
-            u32 stack_depath = max_t(u32, fp->aux->stack_depath, 1);
-            fp->bpf_func = interpreters[(round_up(stack_depth, 32) / 32) - 1];
-    #else
-            fp->bpf_func = __bpf_prog_ret0_warn;
-    #endif
-    }
-    ```
-    The interpreter defined at file `kernel/bpf/core.c`.<br>
-    ```c
-    #define PROG_NAME(stack) __bpf_prog_run##stack_size
-    #define DEFINE_BPF_PROG_RUN(stack_size) \
-    static unsigned int PROG_NAME(stack_size)(const void *ctx, const struct bpf_insn *insn) \
-    { \
-            u64 stack[stack_size / sizeof(u64)]; \
-            u64 regs[MAX_BPF_EXT_REG]; \
-    \
-            FP = (u64)(unsigned long) &stack[ARRAY_SIZE(stack)]; \
-            ARG1 = (u64) (unsigned long) ctx; \
-            return ___bpf_prog_run(regs, insn); \
-    }
+        return fp;
+}
+```
 
-    static unsigned int (*interpreters[])(const void *ctx, const struct bpf_insn *insn) = {
-        EVAL6(PROG_NAME_LIST, 32, 64, 96, 128, 160, 192)
-        EVAL6(PROG_NAME_LIST, 224, 256, 288, 320, 352, 384),
-        EVAL4(PROG_NAME_LIST, 416, 448, 480, 512)
-    }
-    ```
-    If the compile option  `CONFIG_BPF_JIT_DEFAULT_ON` and `CONFIG_HAVE_EBPF_JIT` is enabled (bpf_prog->jit_rqeusted), <br>
-    the `BPF` program should be JIT compiler compiling before executed.<br>
-    If the JIT image is built success, that `prog->bpf_func` replace by the image and the `jited` flag will be setup.<br>
-    ```c
-    arch/x86/net/bpf_jit_comp.c
-    struct x64_jit_data {
+If system not enable option `CONFIG_BPF_JIT_ALWAYS_ON`, the `bpf_func` which called when hook function trigger be assigned to BPF interpreter.<br>
+```c
+static void bpf_prog_select_func(struct bpf_prog *fp) {
+#ifndef CONFIG_BPF_JIT_ALWAYS_ON
+        u32 stack_depath = max_t(u32, fp->aux->stack_depath, 1);
+        fp->bpf_func = interpreters[(round_up(stack_depth, 32) / 32) - 1];
+#else
+        fp->bpf_func = __bpf_prog_ret0_warn;
+#endif
+}
+```
+The interpreter defined at file `kernel/bpf/core.c`.<br>
+```c
+#define PROG_NAME(stack) __bpf_prog_run##stack_size
+#define DEFINE_BPF_PROG_RUN(stack_size) \
+static unsigned int PROG_NAME(stack_size)(const void *ctx, const struct bpf_insn *insn) \
+{ \
+        u64 stack[stack_size / sizeof(u64)]; \
+        u64 regs[MAX_BPF_EXT_REG]; \
+\
+        FP = (u64)(unsigned long) &stack[ARRAY_SIZE(stack)]; \
+        ARG1 = (u64) (unsigned long) ctx; \
+        return ___bpf_prog_run(regs, insn); \
+}
+
+static unsigned int (*interpreters[])(const void *ctx, const struct bpf_insn *insn) = {
+EVAL6(PROG_NAME_LIST, 32, 64, 96, 128, 160, 192)
+EVAL6(PROG_NAME_LIST, 224, 256, 288, 320, 352, 384),
+EVAL4(PROG_NAME_LIST, 416, 448, 480, 512)
+}
+```
+If the JIT image is built success, that `prog->bpf_func` was replaced by the image with the setup `jited` flag, or falls back to the interpreter above if failed.<br>
+```c
+arch/x86/net/bpf_jit_comp.c
+struct x64_jit_data {
         struct bpf_binary_header *rw_header;
         struct bpf_binary_header *header;
         int *addrs;
         u8 *image;
         int proglen;
         struct jit_context ctx;
-    };
+};
 
-    struct bpf *bpf_int_jit_compile(struct bpf_prog *prog) {
+struct bpf *bpf_int_jit_compile(struct bpf_prog *prog) {
         struct x64_jit_data *jit_data;
         struct jit_context ctx = {};
 
-                    ...
+                        ...
         addrs = jit_data->addrs;
         addrs = kvmalloc_array(prog->len + 1, sizeof(*addrs), GFP_KERNEL);
 
         /*
-         * Before first pass, make a rough estimation of addrs[]
-         * echo BPF instruction is translated to less than 64 bytes.
-         */
+                * Before first pass, make a rough estimation of addrs[]
+                * echo BPF instruction is translated to less than 64 bytes.
+                */
         for (proglen = 0, i = 0; i <= prog->len; i++) {
-            proglen += 64;
-            addrs[i] = proglen;
+                proglen += 64;
+                addrs[i] = proglen;
         }
 
         for (pass = 0; pass < MAX_PASSES || image; pass++) {
-            proglen = do_jit(prog, addrs, image, rw_image, oldproglen, &ctx, padding);
+                proglen = do_jit(prog, addrs, image, rw_image, oldproglen, &ctx, padding);
                         ...
-            if (image) {
+                if (image) {
                 if (proglen != oldproglen) {
-                    pr_err("bpf_jit: proglen=%d != oldproglen=%d\n",
-                            proglen, oldproglen);
+                        pr_err("bpf_jit: proglen=%d != oldproglen=%d\n",
+                                proglen, oldproglen);
                 }
                 break;
-            }
-                    ...
+                }
+                        ...
         }
         if (bpf_jit_enable > 1)
-            bpf_jit_dump(prog->len, proglen, pass + 1, image);
+                bpf_jit_dump(prog->len, proglen, pass + 1, image);
         if (image) {
-            if (!prog->is_func || extra_pass) {
+                if (!prog->is_func || extra_pass) {
                 if (WARN_ON(bpf_jit_binary_pack_finalize(prog, header, rw_header))) {
-                    header = NULL;
-                    goto out_image;
+                        header = NULL;
+                        goto out_image;
                 }
                 bpf_tail_call_direct_fixup(prog);
-            } else {
+                } else {
                 jit_data->addrs = addrs;
                 jit_data->ctx = ctx;
                 jit_data->proglen = proglen;
                 jit_data->image = image;
                 jit_data->header = header;
                 jit_data->rw_header = rw_header;
-            }
-            prog->bpf_func = (void *)image;
-            prog->jited = 1;
-            prog->jited_len = proglen;
+                }
+                prog->bpf_func = (void *)image;
+                prog->jited = 1;
+                prog->jited_len = proglen;
         }
-                    ...
+                        ...
         return prog;
-    }
-    ```
+}
+```
+<h4 id="bpf_program_manage">bpf program manage</h4>
 
+After success JIT compiled, the bpf program instance was managed by BPF filesystem `prog_idr`.<br>
+```c
+static int bpf_prog_alloc_id(struct bpf_prog *prog) {
+        int id;
+
+        idr_preload(GFP_KERNEL);
+        spin_lock_bh(&prog_idr_lock);
+        id = idr_alloc_cyclic(&prog_idr, prog, 1, INT_MAX, GFP_ATOMIC);
+        if (id > 0)
+                prog->aux->id = id;
+        spin_unlock_bh(&prog_idr_lock);
+        idr_preload_end();
+
+        if (WARN_ON_ONCE(!id))
+                return -ENOSPC;
+        return id > 0 ? 0 : id;
+}
+```
+
+<h3 style="font-weight:bold" id="attach_bpf_program"> Attach BPF program. </h3>
+
+```c
+tools/lib/bpf/libbpf.c
+struct bpf_link *bpf_program__attach(const struct bpf_program *prog) {
+        struct bpf_link *link = NULL;
+        int err;
+
+        err = prog->sec_def->prog_attach_fn(prog, prog->sec_def->cookie, &link);
+        return link;
+}
+```
+`eBPF` support 41 different program type in linux 5.18 and keep increasing.<br>
+Some of those eBPF program was prefined, the hook point existed at source code.<br> The other program (e.g. kprobe, uprobe...) need to attach to kernel by system call.<br>
+#### Kprobe
+According to [Kernel Probes (Kprobes)](https://docs.kernel.org/trace/kprobes.html).<br>
+```
+Kprobes enables you to dynamically break into any kernel routine and collect debugging and performance information non-disruptively.
+You can trap almost any kernel code address, specifying a handler routine to be invoked when the breakpoint is hit.
+```
+`attach_kprobe()` -> `bpf_program__attach_kprobe_opts()` -> `bpf_program__attach_perf_event_opts()`
+```c
+tools/lib/bpf/libbpf.c
+struct pbf_link *bpf_program__attach_perf_event_opts(const struct bpf_program *prog, int pfd,
+                const struct bpf_perf_event_opts *opts) {
+        struct bpf_link_perf *link;
+        int prog_fd, link_fd = -1, err;
+                ...
+        prog_fd = bpf_program__fd(prog); // get the first FD of BPF program from bpf_program.instances.fds
+
+        link->link.detach = &bpf_link_perf_detach;
+        link->link.dealloc = &bpf_link_perf_dealloc;
+        link->perf_event_fd = pfd;
+
+        if (kernel_supports(prog->obj, FEAT_PERF_LINK)) {
+                DECLARE_LIBBPF_OPTS(bpf_link_create_opts, link_opts,
+                                .perf_event.bpf_cookie = OPTS_GET(opts, bpf_cookie, 0));
+                link_fd = bpf_link_create(prog_fd, pfd, BPF_PERF_EVENT, &link_opts);
+                link->link.fd = link_fd;
+        }
+                        ...
+        return &link->link;
+}
+```
+`bpf_link_create()` -> `sys_bpf_fd()` -> `sys_bpf(BPF_LINK_CREATE, ...)`
+```c
+kernel/bpf/syscall.c
+static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size) {
+                ...
+        swtich(cmd) {
+                        ...
+        case BPF_LINK_CREATE:
+                err = link_create(&attr, uattr);
+                break;
+                        ...
+        }
+                ...
+}
+
+static int link_create(union bpf_attr *attr, bpfptr_t uattr) {
+        struct bpf_prog *prog;
+
+        prog = bpf_prog_get(attr->link_create.prog_fd);
+                ...
+        switch(prog->type) {
+                        ...
+        case BPF_PROG_TYPE_KPROBE:
+                if (attr->link_create.attach_type == BPF_PERF_EVENT)
+                        ret = bpf_perf_link_attach(attr, prog);
+                else
+                        ret = bpf_kprobe_multi_link_attach(attr, prog);
+                break;
+                        ...
+        }
+        return ret;
+}
+
+static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog) {
+        struct file *perf_file;
+
+        perf_file = perf_event_get(attr->link_create.target_fd);
+        link = kzalloc(sizeof(*link), GFP_USER);
+        bpf_link_init(&link->link, BPF_LINK_TYPE_PERF_EVENT, &bpf_perf_link_lops, prog);
+        link->perf_file = perf_file;
+
+        bpf_link_prime(&link->link, &link_primer);
+        event = perf_file->private_data;
+        perf_event_set_bpf_prog(event, prog, attr->link_create.perf_event.bpf_cookie);
+        bpf_prog_inc(prog);
+        return bpf_link_settle(&link_primer);
+}
+```
+`perf_event_set_bpf_prog()` -> `perf_event_attach_bpf_prog()`
+```c
+int perf_event_attach_bpf_prog(struct perf_event *event,
+                struct bpf_prog *prog, u64 bpf_cookie) {
+        struct bpf_prog_array *old_array;
+        struct bpf_prog_array *new_array;
+        int ret = -EEXIST;
+
+        old_array = bpf_event_rcu_dereference(event->tp_event->prog_array);
+        ret = bpf_prog_array_copy(old_array, NULL, prog, bpf_cookie, &new_array);
+        event->prog = prog;
+        event->bpf_cookie = bpf_cookie;
+        rcu_assign_pointer(event->tp_event->prog_array, new_array);
+        return ret;
+}
+```
+`kprobe_int3_handler()` -> `struct kprobe.pre_handler = kprobe_dispatcher()` -> `kprobe_perf_func()` -> `trace_call_bpf()`<br>
+```c
+unsigned int trace_call_bpf(struct trace_event_call *call, void *ctx) {
+                ...
+        ret = bpf_prog_run_array(rcu_dereference(call->prog_array), ctx, bpf_prog_run);
+}
+
+static __always_inline u32
+bpf_prog_run_array(const struct bpf_prog_array *array,
+                const void *ctx, bpf_prog_run_fn run_prog) {
+                ...
+        while((prog = READ_ONCE(item->prog))) {
+                run_ctx.bpf_cookie = item->bpf_cookie;
+                ret &= run_prog(prog, ctx);
+                item++;
+        }
+                ...
+}
+
+static __always_inline u32 bpf_prog_run(const struct bpf_prog *prog, const void *ctx) {
+        return __bpf_prog_run(prog, ctx, bpf_dispatcher_nop_func);
+}
+
+static __always_inline u32 __bpf_prog_run(const struct bpf_prog *prog,
+                                          const void *ctx,
+                                          bpf_dispatcher_fn dfunc)
+{
+        u32 ret;
+
+        cant_migrate();
+        if (static_branch_unlikely(&bpf_stats_enabled_key)) {
+                struct bpf_prog_stats *stats;
+                u64 start = sched_clock();
+                unsigned long flags;
+
+                ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+                stats = this_cpu_ptr(prog->stats);
+                flags = u64_stats_update_begin_irqsave(&stats->syncp);
+                u64_stats_inc(&stats->cnt);
+                u64_stats_add(&stats->nsecs, sched_clock() - start);
+                u64_stats_update_end_irqrestore(&stats->syncp, flags);
+        } else {
+                ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+        }
+        return ret;
+}
+
+static __always_inline __nocfi unsigned int bpf_dispatcher_nop_func(const void *ctx,
+                const struct bpf_insn *insnsi,
+                unsigned int (*bpf_func)(const void *, const struct bpf_insn *)) {
+        return bpf_func(ctx, insnsi);
+}
+```
+The function pointer `prog->bpf_func` point to the BPF program image was compiled by `JIT` compiler.<br>
+We can dump this image by `bpftool`
+```
+➜  bpftool git:(master) ✗ sudo ./bpftool prog
+                ...
+138: kprobe  name bpf_prog1  tag 1db92c82623b9aec  gpl
+        loaded_at 2022-07-31T21:44:25+0800  uid 0
+        xlated 384B  jited 218B  memlock 4096B  map_ids 3
+        btf_id 208
+➜  bpftool git:(master) ✗ sudo ./bpftool prog dump xlated id 138
+int bpf_prog1(struct pt_regs * ctx):
+; bpf_probe_read_kernel(&skb, sizeof(skb), (void *)PT_REGS_PARM1(ctx));
+   0: (79) r3 = *(u64 *)(r1 +112)
+   1: (bf) r1 = r10
+;
+   2: (07) r1 += -24
+; bpf_probe_read_kernel(&skb, sizeof(skb), (void *)PT_REGS_PARM1(ctx));
+   3: (b7) r2 = 8
+   4: (85) call bpf_probe_read_kernel#-66000
+   5: (b7) r6 = 0
+; dev = _(skb->dev);
+   6: (7b) *(u64 *)(r10 -16) = r6
+   7: (79) r3 = *(u64 *)(r10 -24)
+   8: (07) r3 += 16
+   9: (bf) r1 = r10
+;
+  10: (07) r1 += -16
+; dev = _(skb->dev);
+  11: (b7) r2 = 8
+  12: (85) call bpf_probe_read_kernel#-66000
+  13: (79) r7 = *(u64 *)(r10 -16)
+; len = _(skb->len);
+  14: (63) *(u32 *)(r10 -16) = r6
+  15: (79) r3 = *(u64 *)(r10 -24)
+  16: (07) r3 += 112
+  17: (bf) r1 = r10
+;
+  18: (07) r1 += -16
+; len = _(skb->len);
+  19: (b7) r2 = 4
+  20: (85) call bpf_probe_read_kernel#-66000
+  21: (61) r6 = *(u32 *)(r10 -16)
+  22: (bf) r1 = r10
+;
+  23: (07) r1 += -16
+; bpf_probe_read_kernel(devname, sizeof(devname), dev->name);
+  24: (b7) r2 = 16
+  25: (bf) r3 = r7
+  26: (85) call bpf_probe_read_kernel#-66000
+; if (devname[0] == 'l' && devname[1] == 'o') {
+  27: (71) r1 = *(u8 *)(r10 -16)
+; if (devname[0] == 'l' && devname[1] == 'o') {
+  28: (55) if r1 != 0x6c goto pc+17
+; if (devname[0] == 'l' && devname[1] == 'o') {
+  29: (71) r1 = *(u8 *)(r10 -15)
+; if (devname[0] == 'l' && devname[1] == 'o') {
+  30: (55) if r1 != 0x6f goto pc+15
+  31: (b7) r1 = 0
+; char fmt[] = "skb %p len %d\n";
+  32: (73) *(u8 *)(r10 -26) = r1
+  33: (b7) r1 = 2660
+  34: (6b) *(u16 *)(r10 -28) = r1
+  35: (b7) r1 = 622882405
+  36: (63) *(u32 *)(r10 -32) = r1
+  37: (18) r1 = 0x6c20702520626b73
+  39: (7b) *(u64 *)(r10 -40) = r1
+; bpf_trace_printk(fmt, sizeof(fmt), skb, len);
+  40: (79) r3 = *(u64 *)(r10 -24)
+  41: (bf) r1 = r10
+; char fmt[] = "skb %p len %d\n";
+  42: (07) r1 += -40
+; bpf_trace_printk(fmt, sizeof(fmt), skb, len);
+  43: (b7) r2 = 15
+  44: (bf) r4 = r6
+  45: (85) call bpf_trace_printk#-62640
+; return 0;
+  46: (b7) r0 = 0
+  47: (95) exit
+```
