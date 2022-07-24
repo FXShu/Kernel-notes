@@ -491,25 +491,27 @@ The flag `SHF_EXECINSTR` means that `The section contains executable machine ins
 <h3 style="font-weight:bold" id="load_bpf_prog_to_kernel"> Load BPF program to Kernel. </h3>
 
 #### User Space
-`bpf_object__load()` -> `bpf_object_load()` -> `bpf_object__probe_loading()`
+`bpf_object__load()` -> `bpf_object_load()` -> `bpf_object__load_progs()` -> `bpf_object_load_prog()`
 ```c
-static int bpf_object__probe_loading(struct bpf_object *obj) {
-        char *cp, errmsg[STRERR_BUFSIZE];
-        struct bpf_insn insns[] = {
-                BPF_MOV64_IMM(BPF_REG_0, 0),
-                BPF_EXIT_INSN(),
-        };
-        int ret, insn_cnt = ARRAY_SIZE(insns);
+static int bpf_object_load_prog(struct bpf_object *obj, struct bpf_program *prog, const char *license, __u32 kern_ver) {
                 ...
-        ret = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns, insn_cnt, NULL);
-        if (ret < 0)
-                ret = bpf_prog_load(BPF_PROG_TYPE_TRACEPOINT, NULL, "GPL", insns, insn_cnt, NULL);
-                ...
+        for (i = 0; i < prog->instances.nr; i++) {
+                struct bpf_prog_prep_result result;
+                bpf_program_prep_t preprocessor = prog->preprocessor;
+
+                preprocessor(prog, i, prog->insns, prog->insns_cnt, &result);
+
+                bpf_object_load_prog_instance(obj, prog, result.new_insn_ptr,
+                                result.new_insn_cnt, license, kern_ver, &fd);
+                prog->instances.fds[i] = fd;
+        }
+        return libbpf_err(err);
 }
 
 ```
-`bpf_prog_load()` -> `bpf_prog_load()` -> `bpf_load_program()` -> `bpf_load_program_xattr2()` -><br>
+`bpf_object_load_prog_instance()` -> `bpf_prog_load()` -> `bpf_prog_load()` -> `bpf_load_program()` -> `bpf_load_program_xattr2()` -><br>
 `bpf_prog_load_v0_6_0()` -> `sys_bpf_prog_load()` -> ... -> `__sys_bpf`.<br>
+After BPF program loading success, the file descriptor of program will return and store at the `prog->instances.fds` field.<br>
 #### Kernel Space
 ```c
 kernel/bpf/syscall.c
@@ -671,6 +673,33 @@ if (image) {
 }
                 ...
 return prog;
+}
+```
+
+<h3 style="font-weight:bold" id="attach_bpf_program"> Attach BPF program. </h3>
+
+BPF program split to 5 module : `tracepoint`, `kprobe/uprobe`, `cgroup` and `socket`.<br>
+There's lots of predefine BPF hook exist at linux kernel, for example network packet ingress.<br>
+```c
+int sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb, enum skb_drop_reason *reason) {
+        err = sk_filter(sk, skb); // <- BPF program calling
+        if (err) {
+                drop_reason = SKB_DROP_REASON_SOCKET_FILTER;
+                goto out;
+        }
+        err = __sock_queue_rcv_skb(sk, skb);
+}
+```
+BPF programer 
+
+`tracepoint` and `kprobe/uprobe` usually used to tracing, `cgroup` used to monitor the character device  
+```c
+struct bpf_link *bpf_program__attach(const struct bpf_program *prog) {
+        struct bpf_link *link = NULL;
+        int err;
+
+        err = prog->sec_def->prog_attach_fn(prog, prog->sec_def->cookie, &link);
+        return link;
 }
 ```
 
