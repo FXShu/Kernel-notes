@@ -678,7 +678,18 @@ return prog;
 
 <h3 style="font-weight:bold" id="attach_bpf_program"> Attach BPF program. </h3>
 
+```c
+tools/lib/bpf/libbpf.c
+struct bpf_link *bpf_program__attach(const struct bpf_program *prog) {
+        struct bpf_link *link = NULL;
+        int err;
+
+        err = prog->sec_def->prog_attach_fn(prog, prog->sec_def->cookie, &link);
+        return link;
+}
+```
 BPF program split to 5 module : `tracepoint`, `kprobe/uprobe`, `cgroup` and `socket`.<br>
+#### Socket
 There's lots of predefine BPF hook exist at linux kernel, for example network packet ingress.<br>
 ```c
 int sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb, enum skb_drop_reason *reason) {
@@ -690,16 +701,108 @@ int sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb, enum skb_dro
         err = __sock_queue_rcv_skb(sk, skb);
 }
 ```
-BPF programer 
 
-`tracepoint` and `kprobe/uprobe` usually used to tracing, `cgroup` used to monitor the character device  
+#### Kprobe / Uprobe
+According to [Kernel Probes (Kprobes)](https://docs.kernel.org/trace/kprobes.html).<br>
+```
+Kprobes enables you to dynamically break into any kernel routine and collect debugging and performance information non-disruptively.
+You can trap almost any kernel code address, specifying a handler routine to be invoked when the breakpoint is hit.
+```
+`attach_kprobe()` -> `bpf_program__attach_kprobe_opts()`
 ```c
-struct bpf_link *bpf_program__attach(const struct bpf_program *prog) {
-        struct bpf_link *link = NULL;
-        int err;
+struct pbf_link *bpf_program__attach_perf_event_opts(const struct bpf_program *prog, int pfd,
+                const struct bpf_perf_event_opts *opts) {
+        struct bpf_link_perf *link;
+        int prog_fd, link_fd = -1, err;
+                ...
+        prog_fd = bpf_program__fd(prog); // get the first FD of BPF program from bpf_program.instances.fds
 
-        err = prog->sec_def->prog_attach_fn(prog, prog->sec_def->cookie, &link);
-        return link;
+        link->link.detach = &bpf_link_perf_detach;
+        link->link.dealloc = &bpf_link_perf_dealloc;
+        link->perf_event_fd = pfd;
+
+        if (kernel_supports(prog->obj, FEAT_PERF_LINK)) {
+                DECLARE_LIBBPF_OPTS(bpf_link_create_opts, link_opts,
+                                .perf_event.bpf_cookie = OPTS_GET(opts, bpf_cookie, 0));
+                link_fd = bpf_link_create(prog_fd, pfd, BPF_PERF_EVENT, &link_opts);
+                link->link.fd = link_fd;
+        }
+                        ...
+        return &link->link;
+}
+
+static int bpf_perf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog) {
+        struct file *perf_file;
+
+        perf_file = perf_event_get(attr->link_create.target_fd);
+        link = kzalloc(sizeof(*link), GFP_USER);
+        bpf_link_init(&link->link, BPF_LINK_TYPE_PERF_EVENT, &bpf_perf_link_lops, prog);
+        link->perf_file = perf_file;
+
+        bpf_link_prime(&link->link, &link_primer);
+        event = perf_file->private_data;
+        perf_event_set_bpf_prog(event, prog, attr->link_create.perf_event.bpf_cookie);
+        bpf_prog_inc(prog);
+        return bpf_link_settle(&link_primer);
+}
+```
+`perf_event_set_bpf_prog()` -> `perf_event_attach_bpf_prog()`
+```c
+int perf_event_attach_bpf_prog(struct perf_event *event,
+                struct bpf_prog *prog, u64 bpf_cookie) {
+        struct bpf_prog_array *old_array;
+        struct bpf_prog_array *new_array;
+        int ret = -EEXIST;
+
+        old_array = bpf_event_rcu_dereference(event->tp_event->prog_array);
+        ret = bpf_prog_array_copy(old_array, NULL, prog, bpf_cookie, &new_array);
+        event->prog = prog;
+        event->bpf_cookie = bpf_cookie;
+        rcu_assign_pointer(event->tp_event->prog_array, new_array);
+        return ret;
+}
+```
+`kprobe_int3_handler()` -> `struct kprobe.pre_handler = kprobe_dispatcher()` -> `kprobe_perf_func()` -> `trace_call_bpf()`<br>
+```c
+unsigned int trace_call_bpf(struct trace_event_call *call, void *ctx) {
+                ...
+        ret = bpf_prog_run_array(rcu_dereference(call->prog_array), ctx, bpf_prog_run);
+}
+
+static __always_inline u32
+bpf_prog_run_array(const struct bpf_prog_array *array,
+                const void *ctx, bpf_prog_run_fn run_prog) {
+                ...
+        while((prog = READ_ONCE(item->prog))) {
+                run_ctx.bpf_cookie = item->bpf_cookie;
+                ret &= run_prog(prog, ctx);
+                item++;
+        }
+                ...
+}
+
+static __always_inline u32 __bpf_prog_run(const struct bpf_prog *prog,
+                                          const void *ctx,
+                                          bpf_dispatcher_fn dfunc)
+{
+        u32 ret;
+
+        cant_migrate();
+        if (static_branch_unlikely(&bpf_stats_enabled_key)) {
+                struct bpf_prog_stats *stats;
+                u64 start = sched_clock();
+                unsigned long flags;
+
+                ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+                stats = this_cpu_ptr(prog->stats);
+                flags = u64_stats_update_begin_irqsave(&stats->syncp);
+                u64_stats_inc(&stats->cnt);
+                u64_stats_add(&stats->nsecs, sched_clock() - start);
+                u64_stats_update_end_irqrestore(&stats->syncp, flags);
+        } else {
+                ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+        }
+        return ret;
 }
 ```
 
