@@ -47,12 +47,15 @@ module_init(llc_init);
 <p>
 
 ```c
+net/core/dev.c
 void dev_add_pack(struct packet_type *pt) {
     struct list_head *head = ptype_head(pt);
     spin_lock(&ptype_lock);
     list_add_rcu(&pt->list, head);
     spin_unlock(&ptype_lock);
 }
+
+struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
 
 static inline struct list_head *ptype_head(const struct packet_type *pt) {
     if (pt->type == htons(ETH_P_ALL))
@@ -65,12 +68,13 @@ static inline struct list_head *ptype_head(const struct packet_type *pt) {
 
 After calling `dev_add_pack()`, LLC module register the packet (Ethtype == ETH_P_802_2) handler to MAC layer.  
 The complete packet handle process (For example MAC80211):  
-`ieee8011_rx_h_data()` -> `ieee80211_deliver_skb()` -> `netif_receive_skb()` ->  
+`ieee80211_rx_h_data()` -> `ieee80211_deliver_skb()` -> `netif_receive_skb()` ->  
 	`netif_receive_skb_internal()` -> `__netif_receive_skb()` -> `__netif_receive_skb_core()`  
 <details><summary>__netif_receive_skb_core()</summary>
 <p>
 
 ```c
+net/core/dev.c
 static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc, struct packet_type **ppt_prev) {
 		.
 		.
@@ -80,7 +84,7 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc, stru
 		deliver_ptype_list_skb(skb, &pt_prev, orig_dev, type, &ptype_base[ntohs(type) & PTYPE_HASH_MASK])
 	}
 }
-
+	
 static inline void deliver_ptype_list_skb(struct sk_buff *skb, struct packet_type **pt,
 	struct net_device *orig_dev, _be16 type, struct list_head *ptype_list) {
 	list_for_each_entry_rcu(ptype, ptype_list, list) {
@@ -261,6 +265,11 @@ int llc_rcv(struct sk_buff *skb, struct net_device *dev,
 		.
 		.
 		.
+	sap = llc_sap_find(pdu->dsap);
+	if (unlikely(pdu->dsap)) {
+		dprintk("%s: llc_sap_find(%02x) failed\n", __func__, pdu->dsap);
+		goto drop;
+	}
 	rcv = rcu_derefence(sap->rcv_func);
 	dest = llc_pdu_type(skb);
 	sap_handler = dest ? READ_ONCE(llc_type_handlers[dest - 1]) : NULL;
@@ -303,7 +312,7 @@ static int __init llc2_init(void) {
 void llc_add_pack(int type, void (*handler)(struct llc_sap *sap, struct sk_buff *skb)) {
 	smp_wmb();
 	if (type == LLC_DEST_SAP || type == LLC_DEST_CONN)
-		llc_type_handler[type - 1] = handler;
+		llc_type_handlers[type - 1] = handler;
 }
 ```
 According to the Kconfig of LLC module.
