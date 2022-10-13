@@ -3,10 +3,31 @@
 ## linux/sample/bpf
 Patch those [modification](https://patchwork.ozlabs.org/project/netdev/patch/20190518004639.20648-1-mcroce@redhat.com/) before build bpf sample.
 
+
+## Standard API
+See [Understanding the eBPF networking features in RHEL](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/configuring_and_managing_networking/assembly_understanding-the-ebpf-features-in-rhel_configuring-and-managing-networking) for detail ebpf type introduce.
+
+
 ## Kprobe
 Developer can attach eBPF program wherever in kernel via `kprobe` module. But pleaseb remeber that `kprobe` is not the standard eBPF API, Iterations of kernel version may make `kprobe` type program meaningless.<br>
+Traceable function persent at `/proc/kallsyms` :
+```sh
+➜  linux git:(master) ✗ vim ~/tmp/kallsyms
+0000000000000000 A fixed_percpu_data
+0000000000000000 A __per_cpu_start
+0000000000000000 A cpu_debug_store
+0000000000000000 A irq_stack_backing_store
+0000000000000000 A cpu_tss_rw
+0000000000000000 A gdt_page
+0000000000000000 A exception_stacks
+0000000000000000 A entry_stack_storage
+0000000000000000 A espfix_waddr
+0000000000000000 A espfix_stack
+                ...
+```
 The `eBPF` program wii be triggered when attached function is called. developer can get input parameter via macro `PT_REGS_PARM${parameter_index}`.<br>
 ```c
+tools/lib/bpf/bpf_tracing.h
 #define PT_REGS_PARM1(x) (__PT_REGS_CAST(x)->__PT_PARM1_REG)
 #define PT_REGS_PARM2(x) (__PT_REGS_CAST(x)->__PT_PARM2_REG)
 #define PT_REGS_PARM3(x) (__PT_REGS_CAST(x)->__PT_PARM3_REG)
@@ -144,6 +165,220 @@ In `libbpf`, user can access return value via macro `PT_REGS_RC()` when target f
 ```
 
 ## Uprobe
+Uprobe is the userspace version of Kprobe, developer can hook ebpf program to application via uprobe.<br>
+Similar with kprobe, uprobe provide function entry and function exist hook fucntion, `uprobe` and `uretprobe`.<br>
+The input parameter printing please reference kprobe sample.<br>
+Here we will discussion how to trace local variable and stack.<br>
+### Local Variable Tracing
+A userspace application `sample2` as below : <br>
+```c
+#include <stdio.h>
+#include <stdint.h>
+
+struct test_struct {
+	uint8_t variable1;
+	uint8_t variable2;
+	uint32_t variable3;
+	uint32_t variable4;
+};
+
+uint8_t foo1(uint8_t input) {
+	uint8_t variable1 = 100;
+	struct test_struct struct1;
+	variable1 -= input;
+	return (variable1 < 50 ? 1 : 0);
+}
+
+int main(int argc, char **argv) {
+	printf("size of test_struct is %ld\n", sizeof(struct test_struct));
+	printf("%d\n", foo1(8));
+}
+```
+In this case, we want to trace the local variable `variable1` in function `foo1`.<br>
+This variable is initially 100, then the input parameter `input` is subtracted. So we have to hook ebpf program to the third line of function `foo1`.<br>
+We can find the offset via `objdump`.
+```sh
+➜  assembly_test objdump -S sample2
+                ...
+uint8_t foo1(uint8_t input) {
+    1149:	f3 0f 1e fa          	endbr64 
+    114d:	55                   	push   %rbp
+    114e:	48 89 e5             	mov    %rsp,%rbp
+    1151:	89 f8                	mov    %edi,%eax
+    1153:	88 45 ec             	mov    %al,-0x14(%rbp)
+	uint8_t variable1 = 100;
+    1156:	c6 45 f3 64          	movb   $0x64,-0xd(%rbp)
+	struct test_struct struct1;
+	variable1 -= input;
+    115a:	0f b6 45 ec          	movzbl -0x14(%rbp),%eax
+    115e:	28 45 f3             	sub    %al,-0xd(%rbp)
+	return (variable1 < 50 ? 1 : 0);
+    1161:	80 7d f3 31          	cmpb   $0x31,-0xd(%rbp)
+    1165:	0f 96 c0             	setbe  %al
+}
+    1168:	5d                   	pop    %rbp
+    1169:	c3                   	retq   
+                ...
+```
+The function entry is 0x1149 and subtract is 0x115e. because we want to observe the result of subtract, so the offset will be `0x1161` - `0x1149` = 24.<br>
+The next step is finding virtual memory address of `variable1`.<br>
+As the virtual memory layout of linux, local variable is stored at stack (start from the top of current stack).<br>
+<img src=./picture/ebpf/virtual_memory_layout.png width=300px><br>
+
+The address of top of current stack is stored at `rbp` register (x86 arch). so the address of `variable1` wii be : rbp - 0x0d (I actually not sure why variable1 is behind struct 1).<br>
+Now we know the memory address of `variable1` and the location of `variable1` modification. the ebpf program will be :<br>
+```c
+#include <linux/version.h>
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include "trace_common.h"
+#define _(P)                                                                   \
+	({                                                                     \
+		typeof(P) val = 0;                                             \
+		bpf_probe_read_user(&val, sizeof(val), &(P));                  \
+		val;                                                           \
+	})
+
+SEC("uprobe//home/markshu/any_test/assembly_test/sample2:foo1+24")
+int bpf_prog2(struct pt_regs *ctx) {
+	long bp = (long)PT_REGS_RET(ctx);
+	uint8_t return_value = PT_REGS_RC(ctx);
+	//uint8_t return_value = PT_REGS_SP(ctx);
+	uint8_t *variable_ptr = (uint8_t *)(bp - 0xd);
+	char fmt[] = "hello foo1+24, %lx, %d\n";
+	bpf_trace_printk(fmt, sizeof(fmt), bp, _(*variable_ptr));
+	return 0;
+}
+char _license[] SEC("license") = "GPL";
+u32 _version SEC("version") = LINUX_VERSION_CODE;
+```
+The execution will be:<br>
+```sh
+➜  bpf git:(master) ✗ sudo ./ebpf_sample2
+         sample2-619114  [002] d...1 518475.304742: bpf_trace_printk: hello foo1+24, 7ffd03a949d0, 92
+```
+### Caller Stack Tracing
+To tracing the caller stack, that's some knowledge required.<br>
+1. Return Address<br>
+<img src="./picture/ebpf/virtual_memory_layout_return_address.png" width=300px><br>
+When the callee push to stack, the address of next instruction of caller will be stored 8 byte above from stack base pointer(RBP).<br>
+After the callee finished, CPU pop the callee stack and go back to the record address to execute instruction continually.<br>
+To tracing the complete caller chain, we can extract all return address in stack and find those instruction belong to which functions.<br>
+We can also get those address by eBPF helper [bpf_get_stack](https://man7.org/linux/man-pages/man7/bpf-helpers.7.html).
+For more information, please refer [你所不知道的 C 語言: 函式呼叫篇](https://hackmd.io/@dange/rk9xmgHKX?type=view).<br>
+2. Text Segment
+The soruce code was stored at text segment. the syscall `exec()` copies text section of ELF file to text segement in virtual memory.<br>
+<img src="./picture/ebpf/segments_and_sections.png" width=300px><br>
+
+3. Base Address
+[Supporting Relocation](https://www.gnu.org/software/gnulib/manual/html_node/Supporting-Relocation.html).<br>
+
+eBPF program is as below :
+```c
+#include <linux/version.h>
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include "trace_common.h"
+#define _(P)                                                                   \
+        ({                                                                     \
+                typeof(P) val = 0;                                             \
+                bpf_probe_read_user(&val, sizeof(val), &(P));                  \
+                val;                                                           \
+        })
+
+SEC("uprobe//home/markshu/any_test/assembly_test/sample2:foo1+24")
+int bpf_prog2(struct pt_regs *ctx) {
+        long bp = (long)PT_REGS_FP(ctx);
+        long *rsp = (long *)(bp + 0x8);
+        uint8_t *variable_ptr = (uint8_t *)(bp - 0xd);
+        char fmt[] = "hello foo1+24, %lx, %d\n";
+        bpf_trace_printk(fmt, sizeof(fmt), _(*rsp), _(*variable_ptr));
+        return 0;
+}
+
+char _license[] SEC("license") = "GPL";
+u32 _version SEC("version") = LINUX_VERSION_CODE;
+```
+When the demo app execute, we can get the return address of function `foo1` is `0x55b89d2f81bd`.<br>
+```sh
+➜  bpf git:(master) ✗ sudo ./memory_leak_detect
+         sample2-1585626 [004] d...1 740631.387622: bpf_trace_printk: hello foo1+24, 55b89d2f81bd, 92
+```
+Return Address must point to an instruction which stored in `Text` segment. We can check it's legality via `/proc/${PID}/maps`.<br>
+```sh
+➜  ~ cat /proc/1585626/maps
+55b89d2f7000-55b89d2f8000 r--p 00000000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
+55b89d2f8000-55b89d2f9000 r-xp 00001000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
+55b89d2f9000-55b89d2fa000 r--p 00002000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
+55b89d2fa000-55b89d2fb000 r--p 00002000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
+55b89d2fb000-55b89d2fc000 rw-p 00003000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
+55b89e415000-55b89e436000 rw-p 00000000 00:00 0                          [heap]
+7f7bbb76d000-7f7bbb78f000 r--p 00000000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
+7f7bbb78f000-7f7bbb907000 r-xp 00022000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
+7f7bbb907000-7f7bbb955000 r--p 0019a000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
+7f7bbb955000-7f7bbb959000 r--p 001e7000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
+7f7bbb959000-7f7bbb95b000 rw-p 001eb000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
+7f7bbb95b000-7f7bbb961000 rw-p 00000000 00:00 0
+7f7bbb984000-7f7bbb985000 r--p 00000000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
+7f7bbb985000-7f7bbb9a8000 r-xp 00001000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
+7f7bbb9a8000-7f7bbb9b0000 r--p 00024000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
+7f7bbb9b1000-7f7bbb9b2000 r--p 0002c000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
+7f7bbb9b2000-7f7bbb9b3000 rw-p 0002d000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
+7f7bbb9b3000-7f7bbb9b4000 rw-p 00000000 00:00 0
+7ffd03a89000-7ffd03aaa000 rw-p 00000000 00:00 0                          [stack]
+7ffd03b98000-7ffd03b9c000 r--p 00000000 00:00 0                          [vvar]
+7ffd03b9c000-7ffd03b9e000 r-xp 00000000 00:00 0                          [vdso]
+7fffffffe000-7ffffffff000 --xp 00000000 00:00 0                          [uprobes]
+ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsyscall]
+```
+The `Text` segment usually have `executable (x)` permission, it's easy to find. In this case is `0x55b89d2f8000 - 0x55b89d2f9000`.<br>
+The offset of instruction is 0x55b89d2f81bd - 0x55b89d2f8000 = 0x1bd, and we also know the `Text` segment is copied from `Text` section of executable file.<br>
+Finally, we can locate the instruction via `objdump`.<br>
+```sh
+➜  assembly_test objdump -d sample2
+
+sample2:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+0000000000001000 <_init>:
+    1000:       f3 0f 1e fa             endbr64
+    1004:       48 83 ec 08             sub    $0x8,%rsp
+    1008:       48 8b 05 d9 2f 00 00    mov    0x2fd9(%rip),%rax        # 3fe8 <__gmon_start__>
+    100f:       48 85 c0                test   %rax,%rax
+    1012:       74 02                   je     1016 <_init+0x16>
+    1014:       ff d0                   callq  *%rax
+    1016:       48 83 c4 08             add    $0x8,%rsp
+    101a:       c3                      retq
+                        ...
+000000000000118a <main>:
+    118a:       f3 0f 1e fa             endbr64
+    118e:       55                      push   %rbp
+    118f:       48 89 e5                mov    %rsp,%rbp
+    1192:       48 83 ec 10             sub    $0x10,%rsp
+    1196:       89 7d fc                mov    %edi,-0x4(%rbp)
+    1199:       48 89 75 f0             mov    %rsi,-0x10(%rbp)
+    119d:       be 0c 00 00 00          mov    $0xc,%esi
+    11a2:       48 8d 3d 5b 0e 00 00    lea    0xe5b(%rip),%rdi        # 2004 <_IO_stdin_used+0x4>
+    11a9:       b8 00 00 00 00          mov    $0x0,%eax
+    11ae:       e8 ad fe ff ff          callq  1060 <printf@plt>
+    11b3:       bf 08 00 00 00          mov    $0x8,%edi
+    11b8:       e8 ac ff ff ff          callq  1169 <foo1>
+    11bd:       bf 01 00 00 00          mov    $0x1,%edi
+    11c2:       b8 00 00 00 00          mov    $0x0,%eax
+    11c7:       e8 a4 fe ff ff          callq  1070 <sleep@plt>
+    11cc:       eb ef                   jmp    11bd <main+0x33>
+    11ce:       66 90                   xchg   %ax,%ax
+
+00000000000011d0 <__libc_csu_init>:
+                        ...
+```
+As the result of objdump, the address offset of `main` fucntion is from `0x18a` to `0x1d0` which is contain `0x1bd`, so the caller of `foo1()` is `main()`.<br>
+
+
 Patch below patch before compile `libbpf`. This patch reference [[PATCH v3 bpf-next 1/4] libbpf: support function name-based attach uprobes](https://lore.kernel.org/bpf/1643645554-28723-2-git-send-email-alan.maguire@oracle.com/)<br>
 ```patch
 diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
