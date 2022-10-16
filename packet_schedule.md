@@ -41,6 +41,7 @@ Components of packet schedule are `Queue-discipline(Qdisc)`, `Class` and `Filter
 * Class<br>
 	`Class` used to present control strategy<br>
 * [Filter](#filter_topic)<br>
+
 	`Filter` used to deliver package to specific control strategy.<br> 
 ```c
 int register_netdevice(struct net_device *dev){
@@ -475,6 +476,7 @@ static struct sk_buff *cbq_dequeue(struct Qdisc *sch) {
 
 <h3 id="filter_topic"> Filter</h3>
 
+
 ```c
 static int __init tc_filter_init(void) {
 	int err;
@@ -903,6 +905,356 @@ static __latent_entropy void net_tx_action(stuct softirq_action *h) {
 	xfrm_dev_backlog(sd);
 }
 ```
+<h2 id="queueing_discipline"> Queueing-Discipline </h2>
+<details><summary>pfifo_fast</summary>
+
+`pfifo_fast` is the kernel default queueing-discipline method.<br>
+#### Enqueue
+![pfifo_fast_enqueue](./picture/packet_schedule/pfifo_fast_enqueue.png)
+<p>
+
+```c
+static int pfifo_fast_enqueue(struct sk_buff *skb, struct Qdisc *qdisc,
+		struct sk_buff **to_free) {
+	int band = prio2band[skb->priority & TC_PRIO_MAX];
+	struct pfifo_fast_priv *priv = qdisc_priv(qdisc);
+	struct skb_array *q = band2list(priv, band);
+	unsigned int pkt_len = qdisc_pkt_len(skb);
+	int err;
+
+	err = skb_array_produce(q, skb);
+
+	if (unlikely(err)) {
+		if (qdisc_is_percpu_stats(qdisc))
+			return qdisc_drop_cpu(skb, qdisc, to_free);
+		else
+			return qdisc_drop(skb, qdisc, to_free);
+	}
+
+	qdisc_update_stats_at_enqueue(qdisc, pkt_len);
+	return NET_XMIT_SUCCESS;
+}
+```
+#### Dequeue
+![pfifo_fast_dequeue](./picture/packet_schedule/pfifo_fast_dequeue.png)
+
+```c
+static int pfifo_fast_dequeue(struct Qdisc *qdisc) {
+	struct pfifoa_fast_priv *priv = qdisc_priv(qdisc);
+	struct sk_buff *skb = NULL;
+	bool need_retry = true;
+	int band;
+
+retry:
+	for (band = 0; band < PFIFO_FAST_BANDS && !skb; band++) {
+		struct skb_array *q = band2list(priv, band);
+
+		if (__skb_array_emptry(q))
+			continue;
+		skb = __skb_array_consume(q);
+	}
+		...
+	return skb;
+}
+```
+</p></details>
+
+<details><summary>CBQ</summary>
+
+CBQ is abbreviation of `Classes Base Queue`.<br>
+#### Enqueue
+```c
+static int cbq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
+		struct sk_buff **to_free) {
+	struct cbq_sched_data *q = qdisc_priv(sch);
+	int ret;
+	struct cbq_class *cl = cbq_classify(skb, sch, &ret);
+		...
+}
+
+static struct cbq_class *cbq_classify(struct sk_buff *skb, struct Qdisc *sch, int *qerr) {
+	struct cbq_sched_data *q = qdisc_priv(sch);
+	struct cbq_class *head = &q->link;
+		...
+	/* step 1. If skb->priority points to one of our classes, use it */
+	if (TC_H_MAJ(prio ^ sch->handle) == 0 &&
+			(cl = cbq_class_lookup(q, prio)) != NULL)
+		return cl;
+
+	for (;;) {
+
+		
+	}
+}
+```
+</details>
+
+## TMP
+```mermaid
+	classDiagram
+	class Qdisc {
+
+	}
+	sch .. Qdisc
+	class cbq_sched_data {
+		+ struct cbq_class link
+	}
+	q .. cbq_sched_data
+	class cbq_class {
+		+ struct tcf_block *block
+		+ struct Qdisc *qdisc
+		+ struct Qdisc *q
+		+ struct tcf_proto *filter_list
+	}
+	`q::link` .. cbq_class
+	q --> `q::link`
+	`q::link` --> sch : link.qdisc = sch
+	class tcf_block {
+		+ struct list_head owner_list
+		+ struct chain0 chain0
+		+ struct list_head chain_list
+	}
+	`q::link::block` .. tcf_block
+	`q::link` --> `q::link::block`
+	`q::link::block` --> `q::link::block::chain_list`
+	class tcf_block_owner_item {
+		+ struct list_head list
+		+ struct Qdisc *q
+		+ enum flow_block_binder_type binder_type
+	}
+	owner_item .. tcf_block_owner_item
+	owner_item --> sch : owner_item->q = sch
+	`q::link::block` --> owner_item : owner_list
+	class tcf_filter_chain_list_item {
+		+ struct list_head list
+		+ tcf_chain_head_change_t *chain_head_change()
+		+ void *chain_head_change_priv
+	}
+	class list_item{
+		+ chain_head_change = tcf_chain_head_change_dflt()
+		+ chain_head_change_priv = q::link::filter_list
+	}
+	list_item .. tcf_filter_chain_list_item
+	`q::link::block` --> list_item : block->chain0.filter_chain_list
+	sch --> q : qdisc_priv(sch)
+
+	class tcf_chain {
+		+ struct tcf_proto __rcu *filter_chain
+		+ struct list_head list
+		+ struct tcf_block *block
+	}
+	filter_1 .. tcf_chain
+	`q::link::block::chain0::chain` --> filter_1 : tcf_chain_create()
+	`q::link::block::chain_list` --> filter_1 : tcf_chain_create()	
+	class tcf_proto {
+		+ struct tcf_proto __rcu *next;
+		+ struct tcf_proto_ops *ops
+		+ int classify(struct sk_buff *, const struct tcf_proto *, struct tcf_result *)
+		+ __be16 protocol
+		+ void *data
+		+ void *root
+	}
+	`q::link` "q::link::filter_list"--> ip_tcf_proto_1 : tcf_chain_tp_insert() -> tcf_chain0_head_change()
+	class ip_tcf_proto_1 {
+		+ struct tcf_proto_ops *ops = cls_u32_ops
+		+ int classify(struct sk_buff*, const struct tcf_proto *, struct tcf_result*) = cls_u32_classify
+	}
+	ip_tcf_proto_1 .. tcf_proto
+	tc_u_hnode_1 .. tc_u_hnode
+	ip_tcf_proto_1 "ip_tcf_proto::root" --> tc_u_hnode_1 
+	tc_u_knode_1 .. tc_u_knode
+	tc_u_hnode_1 "tc_u_hnode_1::ht" --> tc_u_knode_1 : 
+	class tc_u_knode {
+		+ struct tc_u32_sel sel
+	}
+```
+### Block
+```c
+struct tcf_block {
+	struct mutex lock;
+	struct list_head chain_list;
+	struct list_head chain_list;
+	u32 index;
+	i32 classid;
+	refcount_t refcnt;
+	struct net *net;
+	struct Qdisc *q;
+	struct rw_semphore cb_lock;
+	struct flow_block flow_block;
+	struct list_head owner_list;
+	bool keep_dst;
+	atomic_t offloadcnt;
+	unsigned int nooffloaddevcnt;
+	unsigned int lockeddevcnt;
+	struct {
+		struct tcf_chain *chain;
+		struct list_head filter_chain_list;
+	} chain0;
+	struct rcu_head rcu;
+	DECLARE_HASHTABLE(proto_destroy_ht, 7);
+	struct mutex proto_destroy_lock;
+}
+
+int tcf_block_get_ext(struct tcf_block **p_block, struct Qdisc *q,
+		struct tcf_block_ext_info *ei, struct netlink_ext_ack *extack) {
+	
+}
+```
+
+### Filter
+<details><summary>RTM_NEWTFILTER (Add new filter)</summary>
+<p>
+
+```c
+static int tc_new_tfilter(struct sk_buff *skb, struct nlmsghdr *n,
+		struct netlink_ext_ack *extack) {
+		...
+	protocol = TC_H_MIN(t->tcm_info);
+	prio = TC_H_MAJ(t->tcm_info);
+	parent = t->tcm_parent;
+		...
+	err = __tcf_qdisc_find(net, &q, &parent, t->tcm_ifindex, false, extack);
+	err = __tcf_qdisc_cl_find(q, parent, &cl, t->tcm_ifindex, extack);
+	block = __tcf_block_find(net, q, cl, t->tcm_ifindex, t->tcm_block_index, extack);
+	block->classid = parent;
+
+	chain_index = tca[TCA_CHAIN] ? nla_get_u32(tca[TCA_CHAIN]) : 0;
+	chain = tcf_chain_get(block, chain_index, true);
+
+	tp = tcf_chain_tp_find(chain, &chain_info, protocol, prio, prio_allocate);
+	if (tp == NULL) {
+		tp_new = tcf_proto_create(name, protocol, prio, chain, rtnl_held, extack);
+		tp = tcf_chain_tp_insert_unique(chain, tp_new, protocol, prio, rtnl_held);
+	}
+
+	fh = tp->ops->get(tp, t->tcm_handle);
+
+	err = tp->ops->change(net, skb, tp, cl, t->tcm_Handle, tca, &fh,
+			flags, extack);
+}
+
+static struct tcf_chain *tcf_chain_create(struct tcf_block *block, u32 chain_index) {
+	struct tcf_chain *chain;
+
+	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
+	if (!chain)
+		return NULL;
+
+	list_add_tail_rcu(&chain->list, &block->chain_list);
+	mutex_init(&chain->filter_chain_lock);
+	chain->block = block;
+	chain->index = chain_index;
+	chain->refcnt = 1;
+	if (!chain->index)
+		block->chain0.chain = chain;
+	return chain;
+}
+
+static struct tcf_proto *tcf_proto_create(const char *kind, u32 protocol,
+		u32 prio, struct tcf_chain *chain,
+		bool rtnl_held, struct netlink_ext_ack *extack) {
+	struct tcf_proto *tp;
+	int err;
+
+	tp = kzalloc(sizeof(*tp), GFP_KERNEL);
+
+	tp->ops = tcf_proto_lookup_ops(kind, rtnl_held, extack);
+	tp->classify = tp->ops->classify;
+	err = tp->ops->init(tp);
+		...
+	return tp;
+}
+```
+</p></details><br>
+
+The filter type `struct tcf_proto_ops` was registered to `tcf_proto_base` by function `register_tcf_proto_ops()` which can be specified by `TCA_KIND` item via netlink command.<br>
+Filter type as below:
+* basic
+* bpf
+* cgroup
+* flow
+* flower
+* fw
+* matchall
+* route
+* rsvp
+* rsvp6
+* tcindex
+<details><summary>u32</summary>
+<p>
+
+The U32 filter is the most advanced filter available in the current implementation.<br>
+It entriely base on hashing tables, which make it robust whne there are many filter rules.<br>
+The U32 filter consisting two fields: `Selector` and `Action`.<br>
+#### Selector
+The selector was declared with `TCA_U32_SEL` item in netlink command.
+```c
+struct tc_u32_sel {
+	unsigned char flags;
+	unsigned char offshift;
+	unsigned char nkeys;
+
+	__be16 offmask;
+	__u16 off;
+	short offoff;
+
+	short hoff;
+	__be32 hmask
+	struct tc_u32_key keys[];
+}
+```
+#### Filter_list
+```c
+static int u32_change(struct net *net, struct sk_buff *skb,
+		struct tcf_proto *tp, unsigned long base, u32 handle,
+		struct nlattr **tca, void **arg, bool ovr, bool rtnl_held,
+		struct netlink_ext_ack *extack) {
+	struct tc_u_knode *n;
+			...
+		
+	n = *arg;
+	if (n) {
+			...
+		err = u32_replace_hw_knode(tp, new, flags, extack);
+		if (err) {
+			u32_destroy_key(new, false);
+			return err;
+		}
+		if (!tc_in_hw(new->flags))
+			new->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
+
+		u32_replace_knode(tp, tp_c, new);
+		tcf_unbind_filter(tp, &n->res);
+		tcf_exts_get_net(&n->exts);
+	}
+	err = u32_set_parms(net, tp, base, n, tb, tca[TCA_RATE], ovr, extack);
+	if (err == 0) {
+		struct tc_u_knode __rcu **ins;
+		struct tc_u_knode *pins;
+
+		err = u32_replace_hw_knode(tp, n, flags, extack);
+		if (err)
+			goto errhw;
+
+		if (!tc_in_hw(n->flags))
+			n->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
+
+		ins = &ht->ht[TC_U32_HASH(handle)];
+		for (pins = rtnl_dereference(*ins); pins;
+				ins = &pins->next, pins = rtnl_deference(*ins))
+			if(TC_U32_NODE(handle)) < TC_U32_NODE(pins->handle)
+				break;
+
+		RCU_INIT_POINTER(n->next, pins);
+		rcu_assign_pointer(*ins, n);
+		tp_c->knodes++;
+		*arg = n;
+		return 0;
+	}
+		...
+}
+```
+</p></details>
 
 ## Reference
 [Linux TC(Traffic Control)框架原理解析](https://blog.csdn.net/dog250/article/details/40483627)
