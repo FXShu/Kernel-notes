@@ -14,8 +14,9 @@ Reading experience of Linux Kernel.
     </tr>
     <tr>
         <td style="border-color:#7C7B7B; color:black;" bgcolor=#CFF6CB align="center" colspan="3" bgcolor=#E1DFDF>I/O subsystem</td>
-        <td style="border-color:#7C7B7B; color:black;" bgcolor=#B8E7E2 align="center" colspan="1" bgcolor=#E1DFDF>Memory <br>Management  <br>(PM)</td>
-        <td style="border-color:#7C7B7B; color:black;" bgcolor=#EEBFD8 align="center" colspan="1" bgcolor=#E1DFDF>Process <br> Management  <br>(MM)</td>
+        <td style="border-color:#7C7B7B; color:black;" bgcolor=#B8E7E2 align="center" colspan="1" bgcolor=#E1DFDF>
+		<a href=https://github.com/FXShu/Kernel-notes/blob/master/memory_management.md>Memory <br>Management  <br>(MM)</a></td>
+        <td style="border-color:#7C7B7B; color:black;" bgcolor=#EEBFD8 align="center" colspan="1" bgcolor=#E1DFDF>Process <br> Management  <br>(PM)</td>
 	</tr>
     <tr>
         <td style="border-top-width:4px; border-top-style:dashed;border-top-color:#A6CD97;
