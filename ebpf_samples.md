@@ -290,13 +290,21 @@ eBPF program is as below :
 
 SEC("uprobe//home/markshu/any_test/assembly_test/sample2:foo1+24")
 int bpf_prog2(struct pt_regs *ctx) {
-        long bp = (long)PT_REGS_FP(ctx);
-        long *rsp = (long *)(bp + 0x8);
-        uint8_t *variable_ptr = (uint8_t *)(bp - 0xd);
-        char fmt[] = "hello foo1+24, %lx, %d\n";
-        bpf_trace_printk(fmt, sizeof(fmt), _(*rsp), _(*variable_ptr));
-        return 0;
+	uint32_t pid = bpf_get_current_pid_tgid() >> 32;
+	pid_t ppid;
+	struct task_struct *current_t = bpf_get_current_task();
+	if (!current_t) return -1;
+//	bpf_core_read(&ppid, sizeof(pid_t), &current_t->pid);
+	ppid = BPF_CORE_READ(current_t, pid);
+	long bp = (long)PT_REGS_FP(ctx);
+	long *rsp = (long *)(bp + 0x8);
+	uint8_t *variable_ptr = (uint8_t *)(bp - 0xd);
+
+	char fmt[] = "current PID %ld, Host PID %ld, Return Address %lx\n";
+	bpf_trace_printk(fmt, sizeof(fmt), pid, ppid, _(*rsp));
+	return 0;
 }
+
 
 char _license[] SEC("license") = "GPL";
 u32 _version SEC("version") = LINUX_VERSION_CODE;
@@ -304,7 +312,7 @@ u32 _version SEC("version") = LINUX_VERSION_CODE;
 When the demo app execute, we can get the return address of function `foo1` is `0x55b89d2f81bd`.<br>
 ```sh
 ➜  bpf git:(master) ✗ sudo ./memory_leak_detect
-         sample2-1585626 [004] d...1 740631.387622: bpf_trace_printk: hello foo1+24, 55b89d2f81bd, 92
+          sample2-134580  [006] d...1 85526.540676: bpf_trace_printk: current PID 134580, Host PID 134580, Return Address 557dbd7de1bd
 ```
 Return Address must point to an instruction which stored in `Text` segment. We can check it's legality via `/proc/${PID}/maps`.<br>
 ```sh
@@ -315,18 +323,7 @@ Return Address must point to an instruction which stored in `Text` segment. We c
 55b89d2fa000-55b89d2fb000 r--p 00002000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
 55b89d2fb000-55b89d2fc000 rw-p 00003000 103:05 7340453                   /home/markshu/any_test/assembly_test/sample2
 55b89e415000-55b89e436000 rw-p 00000000 00:00 0                          [heap]
-7f7bbb76d000-7f7bbb78f000 r--p 00000000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
-7f7bbb78f000-7f7bbb907000 r-xp 00022000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
-7f7bbb907000-7f7bbb955000 r--p 0019a000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
-7f7bbb955000-7f7bbb959000 r--p 001e7000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
-7f7bbb959000-7f7bbb95b000 rw-p 001eb000 103:05 17041564                  /usr/lib/x86_64-linux-gnu/libc-2.31.so
-7f7bbb95b000-7f7bbb961000 rw-p 00000000 00:00 0
-7f7bbb984000-7f7bbb985000 r--p 00000000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
-7f7bbb985000-7f7bbb9a8000 r-xp 00001000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
-7f7bbb9a8000-7f7bbb9b0000 r--p 00024000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
-7f7bbb9b1000-7f7bbb9b2000 r--p 0002c000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
-7f7bbb9b2000-7f7bbb9b3000 rw-p 0002d000 103:05 17041560                  /usr/lib/x86_64-linux-gnu/ld-2.31.so
-7f7bbb9b3000-7f7bbb9b4000 rw-p 00000000 00:00 0
+                        ...
 7ffd03a89000-7ffd03aaa000 rw-p 00000000 00:00 0                          [stack]
 7ffd03b98000-7ffd03b9c000 r--p 00000000 00:00 0                          [vvar]
 7ffd03b9c000-7ffd03b9e000 r-xp 00000000 00:00 0                          [vdso]
@@ -338,12 +335,7 @@ The offset of instruction is 0x55b89d2f81bd - 0x55b89d2f8000 = 0x1bd, and we als
 Finally, we can locate the instruction via `objdump`.<br>
 ```sh
 ➜  assembly_test objdump -d sample2
-
-sample2:     file format elf64-x86-64
-
-
 Disassembly of section .init:
-
 0000000000001000 <_init>:
     1000:       f3 0f 1e fa             endbr64
     1004:       48 83 ec 08             sub    $0x8,%rsp
@@ -355,16 +347,7 @@ Disassembly of section .init:
     101a:       c3                      retq
                         ...
 000000000000118a <main>:
-    118a:       f3 0f 1e fa             endbr64
-    118e:       55                      push   %rbp
-    118f:       48 89 e5                mov    %rsp,%rbp
-    1192:       48 83 ec 10             sub    $0x10,%rsp
-    1196:       89 7d fc                mov    %edi,-0x4(%rbp)
-    1199:       48 89 75 f0             mov    %rsi,-0x10(%rbp)
-    119d:       be 0c 00 00 00          mov    $0xc,%esi
-    11a2:       48 8d 3d 5b 0e 00 00    lea    0xe5b(%rip),%rdi        # 2004 <_IO_stdin_used+0x4>
-    11a9:       b8 00 00 00 00          mov    $0x0,%eax
-    11ae:       e8 ad fe ff ff          callq  1060 <printf@plt>
+                        ...
     11b3:       bf 08 00 00 00          mov    $0x8,%edi
     11b8:       e8 ac ff ff ff          callq  1169 <foo1>
     11bd:       bf 01 00 00 00          mov    $0x1,%edi
@@ -378,7 +361,7 @@ Disassembly of section .init:
 ```
 As the result of objdump, the address offset of `main` fucntion is from `0x18a` to `0x1d0` which is contain `0x1bd`, so the caller of `foo1()` is `main()`.<br>
 
-
+### Patch
 Patch below patch before compile `libbpf`. This patch reference [[PATCH v3 bpf-next 1/4] libbpf: support function name-based attach uprobes](https://lore.kernel.org/bpf/1643645554-28723-2-git-send-email-alan.maguire@oracle.com/)<br>
 ```patch
 diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
