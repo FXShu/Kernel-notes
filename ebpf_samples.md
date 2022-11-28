@@ -7,8 +7,39 @@ Patch those [modification](https://patchwork.ozlabs.org/project/netdev/patch/201
 ## Standard API
 See [Understanding the eBPF networking features in RHEL](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/configuring_and_managing_networking/assembly_understanding-the-ebpf-features-in-rhel_configuring-and-managing-networking) for detail ebpf type introduce.
 
+## eBPF hook module
+Once eBPF program load to kernel success, user can attach to the corresponding module whenever. The module was specified by the section name of ebpf program.<br>
+For example, `SEC("kprobe/ieee80211_key_alloc")` will be attached to kprobe module.<br>
+eBPF support module hooking is as below : <br>
+1. Dynamic Tracing (BPF_PROG_TYPE_KPROBE)
+    1. Kernel Space
+        1. [Kprobe](#kprobe_hook)
+        2. [Kretprobe](#kretprobe_hook)
+    2. User Space
+        1. [Uprobe](#uprobe_hook)
+        2. Uretprobe
+2. Static Tracing (BPF_PROG_TYPE_TRACING)
+    1. Kernel Space
+        1. tracepointer
+    2. User Space
+        1. USDT
+    3. General
+        1. fentry
+        2. fexit
+3. Traffic Controller
+    1. TC
+    2. Classifier
+    3. Action
+4. Linux Security Module (BPF_PROG_TYPE_LSM)
+   1. lsm
+5. Express Data Path (BPF_PROG_TYPE_XDP)
+6. Cgroup 
 
-## Kprobe
+
+
+
+<h2 id=kprobe_hook> Kprobe </h2>
+
 Developer can attach eBPF program wherever in kernel via `kprobe` module. But pleaseb remeber that `kprobe` is not the standard eBPF API, Iterations of kernel version may make `kprobe` type program meaningless.<br>
 Traceable function persent at `/proc/kallsyms` :
 ```sh
@@ -58,11 +89,31 @@ typedef uint8_t u8;
                 bpf_probe_read_kernel(&val, sizeof(val), &(P));                \
                 val;                                                           \
         })
-#if 1
 #define KEY2STR(x) _((x)[0]), _((x)[1])
-#else
-#define KEY2STR(x) _((x)[])
+#define MAX_ENTRIES 20
+#define TK_LENGTH 16
+struct ieee_80211_encrypt_key {
+        u8 key_data[TK_LENGTH];
+        size_t key_len;
+};
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(key_size, sizeof(int));
+        __uint(value_size, sizeof(struct ieee_80211_encrypt_key));
+        __uint(max_entries, 10);
+} key_map SEC(".maps");
+
+void temporary_key_copy(u8 *src, int src_size, u8 *dst, int dst_size) {
+        if (!src || !dst || src_size > dst_size)
+                return;
+#if 1
+        for (int index = 0; index < dst_size; index++) {
+                bpf_probe_read_kernel(&dst[index], sizeof(u8), &src[index]);
+        }
+        return;
 #endif
+}
 
 /*** ieee80211_key_alloc
 * @param1 chiper
@@ -76,25 +127,52 @@ typedef uint8_t u8;
 * */
 SEC("kprobe/ieee80211_key_alloc")
 int bpf_prog(struct pt_regs *ctx) {
+        int key_index = (int)PT_REGS_PARM2(ctx);
         size_t key_len = (size_t)PT_REGS_PARM3(ctx);
         u8 *key_data = (u8 *)PT_REGS_PARM4(ctx);
+
         u64 *key_data_format = (u64 *)key_data;
-        char fmt[] = "ieee80211_key_alloc: key len %ld\n\t%llx %llx";
+        struct ieee_80211_encrypt_key key = {0};
+        key.key_len = key_len;
+        temporary_key_copy(key_data, key_len, key.key_data, TK_LENGTH);
+
+        bpf_map_update_elem(&key_map, &key_index, &key, BPF_ANY);
+        char fmt[] = "ieee80211_key_alloc: key index %ld\n\t%llx %llx";
         if (key_data)
-                bpf_trace_printk(fmt, sizeof(fmt), key_len, KEY2STR(key_data_format));
+                bpf_trace_printk(fmt, sizeof(fmt), key_index, KEY2STR(key_data_format));
         else
-                bpf_trace_printk(fmt, sizeof(fmt), key_len, 0xff);
+                bpf_trace_printk(fmt, sizeof(fmt), key_index, 0xff);
         return 0;
 }
 
 char _license[] SEC("license") = "GPL";
 u32 _version SEC("version") = LINUX_VERSION_CODE;
 ```
-Tip : `eBPF` program works in `eBPF` virtual machine, it's illege to access kernel address directly. Developer should call `bpf_probe_read_kernel` or `bpf_probe_read` (those function are similar in x86 arch, but may be difference in other arch).<br>
 User Space :
 ```c
 #include <stdio.h>
+#include <linux/bpf.h>
 #include <bpf/libbpf.h>
+#include <sys/syscall.h>
+
+struct ieee_80211_encrypt_key {
+        __u8 key_data[16];
+        size_t key_len;
+};
+
+static void foreach_key_map(int map) {
+        __u64 key, next_key;
+        struct ieee_80211_encrypt_key encrypt;
+
+        if (map < 0) return;
+        key = -1;
+        while (bpf_map_get_next_key(map, &key, &next_key) == 0) {
+                bpf_map_lookup_elem(map, &next_key, &encrypt);
+                key = next_key;
+                printf("obj 0x%llx, key %lx %lx\n", next_key,
+                                *(__u64 *)&(encrypt.key_data[0]), *(__u64 *)&(encrypt.key_data[8]));
+        }
+}
 
 int main(int argc, char **argv) {
         struct bpf_object *obj;
@@ -125,9 +203,15 @@ int main(int argc, char **argv) {
                 link = NULL;
                 goto cleanup;
         }
-
-        read_trace_pipe();
-
+        int map_fd = bpf_object__find_map_fd_by_name(obj, "key_map");
+        if (map_fd <= 0) {
+                fprintf(stderr, "map not found\n");
+                goto cleanup;
+        }
+        while(1) {
+                foreach_key_map(map_fd);
+                sleep(1);
+        }
 cleanup:
         bpf_link__destroy(link);
         bpf_object__close(obj);
@@ -137,7 +221,8 @@ cleanup:
 
 <img src=./picture/ebpf/wifi_1_result.png width=700px><br>
 
-## Kretprobe
+<h2 id=kretprobe_hook> Kretprobe </h2>
+
 In `x86` architecture, the function return value will be restore in `EAX` register.<br>
 For a sample increased fucntion like below : <br>
 ```c
@@ -164,7 +249,8 @@ In `libbpf`, user can access return value via macro `PT_REGS_RC()` when target f
 #define __PT_RC_REG eax
 ```
 
-## Uprobe
+<h2 id=uprobe_hook> Uprobe </h2>
+
 Uprobe is the userspace version of Kprobe, developer can hook ebpf program to application via uprobe.<br>
 Similar with kprobe, uprobe provide function entry and function exist hook fucntion, `uprobe` and `uretprobe`.<br>
 The input parameter printing please reference kprobe sample.<br>
@@ -363,6 +449,9 @@ As the result of objdump, the address offset of `main` fucntion is from `0x18a` 
 
 ### Patch
 Patch below patch before compile `libbpf`. This patch reference [[PATCH v3 bpf-next 1/4] libbpf: support function name-based attach uprobes](https://lore.kernel.org/bpf/1643645554-28723-2-git-send-email-alan.maguire@oracle.com/)<br>
+<details><summary>0001-dynamic-symbol-resolute-support.patch</summary>
+<p>
+
 ```patch
 diff --git a/tools/lib/bpf/libbpf.c b/tools/lib/bpf/libbpf.c
 index e89cc9c885b3..7186c03a9bd4 100644
@@ -465,3 +554,4 @@ index e89cc9c885b3..7186c03a9bd4 100644
                         ret = elf_find_relative_offset(binary_path, elf, ret);
                 if (ret > 0)
 ```
+</p></details>

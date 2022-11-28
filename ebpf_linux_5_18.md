@@ -861,6 +861,7 @@ int perf_event_attach_bpf_prog(struct perf_event *event,
         return ret;
 }
 ```
+Kprobe trigger please see [eBPF 动态观测之指令跳板](https://fuweid.com/post/2022-bpf-kprobe-fentry-poke/).<br>
 `kprobe_int3_handler()` -> `struct kprobe.pre_handler = kprobe_dispatcher()` -> `kprobe_perf_func()` -> `trace_call_bpf()`<br>
 ```c
 unsigned int trace_call_bpf(struct trace_event_call *call, void *ctx) {
