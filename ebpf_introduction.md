@@ -1,6 +1,5 @@
 # eBPF Introduction
 
-eBPF(Extended Berkeley Packet Filter) enables the dynamic insertion of code into the linux kernel without requiring modifications or recompilation.<br>
 The eBPF technology was initially introduced as a replacement for BPF(Berkeley Packet Filter). However, it has evloved into a comprehensive framework that enables programmers to interact with a wide array of modules.<br>
 After the success of eBPF, eventually, the BPF was replaced by eBPF fully and renamed to cBPF (classic Berkelay Packet Filter).<br><br>
 <img src="./picture/ebpf/ebpf_applications.png" width=600px><br>
